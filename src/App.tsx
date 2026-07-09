@@ -13,6 +13,8 @@ import {
   Headphones, 
   Settings, 
   ChevronDown, 
+  ChevronUp,
+  ArrowUpDown,
   Search, 
   Bell, 
   Pin, 
@@ -107,6 +109,7 @@ export default function App() {
   const [searchTerm, setSearchTerm] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
+  const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
 
   // Detail panel state
   const [selectedUser, setSelectedUser] = useState<UserData | null>(null);
@@ -262,8 +265,40 @@ export default function App() {
     }
   };
 
+  const handleSort = (key: string) => {
+    let direction: 'asc' | 'desc' = 'asc';
+    if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
+      direction = 'desc';
+    }
+    setSortConfig({ key, direction });
+  };
+
+  const sortedUsers = React.useMemo(() => {
+    let sortableUsers = [...users];
+    if (sortConfig !== null) {
+      sortableUsers.sort((a, b) => {
+        let aValue = "";
+        let bValue = "";
+        if (sortConfig.key === "name") {
+          aValue = `${a.firstName} ${a.lastName}`.toLowerCase();
+          bValue = `${b.firstName} ${b.lastName}`.toLowerCase();
+        } else if (sortConfig.key === "email") {
+          aValue = (a.email || "").toLowerCase();
+          bValue = (b.email || "").toLowerCase();
+        } else if (sortConfig.key === "company") {
+          aValue = (a.company || "").toLowerCase();
+          bValue = (b.company || "").toLowerCase();
+        }
+        if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
+        if (aValue > bValue) return sortConfig.direction === 'asc' ? 1 : -1;
+        return 0;
+      });
+    }
+    return sortableUsers;
+  }, [users, sortConfig]);
+
   // Search filtering
-  const filteredUsers = users.filter(user => 
+  const filteredUsers = sortedUsers.filter(user => 
     `${user.firstName} ${user.lastName}`.toLowerCase().includes(searchTerm.toLowerCase()) ||
     (user.company && user.company.toLowerCase().includes(searchTerm.toLowerCase())) ||
     (user.email && user.email.toLowerCase().includes(searchTerm.toLowerCase()))
@@ -908,8 +943,15 @@ export default function App() {
                                 }}
                               />
                             </th>
-                            <th className="px-6 py-4">Katılımcı</th>
-                            <th className="px-6 py-4">Kurum / Şube</th>
+                            <th className="px-6 py-4 cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('name')}>
+                              <div className="flex items-center gap-1">Katılımcı <ArrowUpDown className="w-3 h-3" /></div>
+                            </th>
+                            <th className="px-6 py-4 cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('email')}>
+                              <div className="flex items-center gap-1">E-Posta <ArrowUpDown className="w-3 h-3" /></div>
+                            </th>
+                            <th className="px-6 py-4 cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('company')}>
+                              <div className="flex items-center gap-1">Kurum / Şube <ArrowUpDown className="w-3 h-3" /></div>
+                            </th>
                             <th className="px-6 py-4">Son Eğitim</th>
                             <th className="px-6 py-4">Durum</th>
                             <th className="px-6 py-4 text-right">İşlem</th>
@@ -965,9 +1007,9 @@ export default function App() {
                                   </div>
                                   <div>
                                     <p className="text-white font-medium group-hover:text-[#5865f2] transition-colors">{user.firstName} {user.lastName}</p>
-                                    <p className="text-[10px] text-gray-500 font-mono">{user.email || "e-posta tanımlanmamış"}</p>
                                   </div>
                                 </td>
+                                <td className="px-6 py-4 text-[12px] text-gray-400 font-mono">{user.email || "-"}</td>
                                 <td className="px-6 py-4 text-[#dbdee1]">{user.company || "Serbest / Tanımsız"}</td>
                                 <td className="px-6 py-4 font-mono text-[12px] text-[#b5bac1]">{lastAttendance}</td>
                                 <td className="px-6 py-4">{statusBadge}</td>
