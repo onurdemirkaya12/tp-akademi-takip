@@ -1,0 +1,62 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  --color-discord-main: #1e1f22;
+  --color-discord-sidebar: #2b2d31;
+  --color-discord-card: #313338;
+  --color-discord-hover: #36373d;
+  --color-discord-blurple: #5865F2;
+  --color-discord-text-primary: #FFFFFF;
+  --color-discord-text-secondary: #B5BAC1;
+}
+
+/* Custom design styles from Sleek Interface Theme */
+.anti-gravity {
+  box-shadow: 0 20px 40px rgba(0,0,0,0.4);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.anti-gravity:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 25px 50px rgba(0,0,0,0.5);
+}
+
+.blurple {
+  background-color: #5865f2;
+}
+
+.blurple-text {
+  color: #5865f2;
+}
+
+.discord-dark {
+  background-color: #313338;
+}
+
+.discord-sidebar {
+  background-color: #2b2d31;
+}
+
+.discord-hover:hover {
+  background-color: #36373d;
+  color: #ffffff;
+}
+
+.active-nav {
+  background-color: #404249;
+  color: #ffffff;
+  border-left: 4px solid #5865f2;
+}
+
+body {
+  background-color: #1e1f22;
+  color: #b5bac1;
+  font-family: var(--font-sans);
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+}

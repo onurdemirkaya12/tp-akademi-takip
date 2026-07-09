@@ -1,0 +1,64 @@
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id        String       @id @default(uuid())
+  firstName String
+  lastName  String
+  company   String?
+  email     String?      @unique
+  phone     String?
+  attendances Attendance[]
+  examResults ExamResult[]
+  createdAt DateTime     @default(now())
+}
+
+model Event {
+  id          String       @id @default(uuid())
+  name        String
+  date        DateTime
+  location    String?
+  exams       Exam[]
+  attendances Attendance[]
+  createdAt   DateTime     @default(now())
+}
+
+model Exam {
+  id           String       @id @default(uuid())
+  name         String
+  passingScore Int          @default(70)
+  eventId      String
+  event        Event        @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  results      ExamResult[]
+  createdAt    DateTime     @default(now())
+}
+
+model Attendance {
+  id        String   @id @default(uuid())
+  userId    String
+  eventId   String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  event     Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, eventId])
+}
+
+model ExamResult {
+  id        String   @id @default(uuid())
+  userId    String
+  examId    String
+  score     Int
+  status    String   // "Geçti" | "Kaldı"
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  exam      Exam     @relation(fields: [examId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, examId])
+}

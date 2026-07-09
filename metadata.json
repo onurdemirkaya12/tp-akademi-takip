@@ -1,0 +1,6 @@
+{
+  "name": "TP-Link Eğitim ve Sınav Dashboard",
+  "description": "TP-Link eğitim ve sınav verilerini yönetmek için Discord temalı, süzülen, modern dashboard arayüzü.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
