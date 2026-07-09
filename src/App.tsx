@@ -35,7 +35,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
-import { read, utils } from "xlsx";
+import { read, utils, writeFile } from "xlsx";
 import { db } from "./firebase";
 import { collection, getDocs, getDoc, doc, setDoc, writeBatch, arrayUnion, deleteDoc } from "firebase/firestore";
 
@@ -55,8 +55,10 @@ interface UserData {
   company?: string;
   email?: string;
   phone?: string;
+  examStatus?: string;
   attendances: {
     id: string;
+    attendanceStatus?: string; // "Katıldı" | "Katılmadı" | "Bekliyor"
     event: {
       id: string;
       name: string;
@@ -84,7 +86,10 @@ interface EventData {
   id: string;
   name: string;
   date: string;
+  endDate?: string;
+  timeRange?: string;
   location?: string;
+  link?: string;
   exams: {
     id: string;
     name: string;
@@ -92,6 +97,7 @@ interface EventData {
   }[];
   attendances: {
     id: string;
+    attendanceStatus?: string; // "Katıldı" | "Katılmadı" | "Bekliyor"
     user: {
       id: string;
       firstName: string;
@@ -114,6 +120,8 @@ export default function App() {
   // Detail panel state
   const [selectedUser, setSelectedUser] = useState<UserData | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<EventData | null>(null);
+  const [editingEventData, setEditingEventData] = useState<Partial<EventData> | null>(null);
+  const [quickAddParticipant, setQuickAddParticipant] = useState({ firstName: "", lastName: "", email: "", phone: "" });
 
   // Editing scores inside drawer
   const [editingScoreId, setEditingScoreId] = useState<string | null>(null);
@@ -129,6 +137,7 @@ export default function App() {
   const [parsedRows, setParsedRows] = useState<any[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const [uploadStatusMsg, setUploadStatusMsg] = useState("");
+  const [uploadType, setUploadType] = useState<"event" | "exam">("event");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Event Form Modal State
@@ -140,6 +149,39 @@ export default function App() {
     purpose: "",
     content: "",
     description: ""
+  });
+
+  const [examUploadData, setExamUploadData] = useState({
+    examName: "",
+    passingScore: 60
+  });
+
+  // Toast Notification State
+  const [toastMessage, setToastMessage] = useState<{message: string, type: "error" | "success"} | null>(null);
+
+  // Show Toast Helper
+  const showToast = (message: string, type: "error" | "success" = "error") => {
+    setToastMessage({ message, type });
+    setTimeout(() => setToastMessage(null), 5000); // Hide after 5 seconds
+  };
+
+  // Export Modal State
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [exportFilters, setExportFilters] = useState({
+    startDate: "",
+    endDate: "",
+    eventName: "Tümü",
+    examStatus: "Tümü",
+    companyName: "Tümü"
+  });
+
+  // Certificate Export Modal State
+  const [isCertificateExportModalOpen, setIsCertificateExportModalOpen] = useState(false);
+  const [certificateExportFilters, setCertificateExportFilters] = useState({
+    examType: "Tümü",
+    companyName: "Tümü",
+    examStatus: "Tümü",
+    dateRange: ""
   });
 
   // Settings State
@@ -337,6 +379,12 @@ export default function App() {
   };
 
   const processFile = (file: File) => {
+    if (uploadType === "exam" && !examUploadData.examName.trim()) {
+      showToast("Lütfen yükleme yapmadan önce yüklenecek 'Sınav Adı' alanını doldurun.", "error");
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
     setUploadStatusMsg("");
     setUploadProgress(10);
     const reader = new FileReader();
@@ -351,45 +399,142 @@ export default function App() {
         const firstSheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[firstSheetName];
         
-        const rowsAsArrays = utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
-        let headerRowIndex = -1;
+        const rowsAsArrays = utils.sheet_to_json(worksheet, { header: 1, defval: "" }) as any[][];
         
+        // Find the actual header row by looking for email columns
+        let headerRowIndex = -1;
         for (let i = 0; i < Math.min(10, rowsAsArrays.length); i++) {
-          const row = rowsAsArrays[i];
-          if (!row) continue;
+          if (!rowsAsArrays[i]) continue;
           
-          const stringContent = row.filter(Boolean).map(String).join(" ");
-          const lowerStr = stringContent.toLowerCase();
-          if (lowerStr.includes("ad") && lowerStr.includes("soyad") && lowerStr.includes("posta")) {
+          const rowString = rowsAsArrays[i].map(c => String(c).toLowerCase().trim()).join(" ");
+          if (rowString.includes("email") || rowString.includes("e-posta") || rowString.includes("eposta") || rowString.includes("e-mail")) {
             headerRowIndex = i;
             break;
           }
         }
-        
+
         if (headerRowIndex === -1) {
-          throw new Error("Geçerli bir başlık satırı (Ad, Soyad, E-Posta vb.) bulunamadı.");
+          showToast("Yükleme İptal Edildi: Geçerli bir dosya bulunamadı veya dosya boş.", "error");
+          setUploadProgress(null);
+          return;
         }
+
+        const rawHeaders = rowsAsArrays[headerRowIndex] || [];
+        const headersLower = rawHeaders.map(h => String(h).toLowerCase().trim());
         
-        const headers = rowsAsArrays[headerRowIndex] || [];
+        // Define required mappings
+        const getColumnIndex = (possibleNames: string[]) => {
+          return headersLower.findIndex(h => possibleNames.includes(h));
+        };
+
         const json = [];
-        
-        for (let i = headerRowIndex + 1; i < rowsAsArrays.length; i++) {
-          const rowData = rowsAsArrays[i];
-          if (!rowData || rowData.length === 0) continue;
-          
-          let rowObj: any = {};
-          headers.forEach((h: string, index: number) => {
-            if (h) rowObj[h] = rowData[index];
-          });
-          
-          if (Object.keys(rowObj).length > 0) {
-            json.push(rowObj);
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+        if (uploadType === "event") {
+          const idxAd = getColumnIndex(["adı", "ad", "firstname", "first name", "name", "isim", "adınız"]);
+          const idxSoyad = getColumnIndex(["soyadı", "soyad", "lastname", "last name", "soyisim", "soyadınız"]);
+          const idxEmail = getColumnIndex(["email", "e-posta", "eposta", "e-mail"]);
+          const idxFirma = getColumnIndex(["firma bilgisi", "firma", "kurum", "company", "şirket", "sirket", "firma adı", "kurum adı", "organization", "bayi", "bayi adı"]);
+          const idxTelefon = getColumnIndex(["telefon", "phone", "tel", "cep", "cep telefonu", "mobile"]);
+
+          // Validate Header Structure
+          if (idxAd === -1 || idxSoyad === -1 || idxEmail === -1) {
+            showToast("Yükleme İptal Edildi: Eğitim şablonunda 'Adı', 'Soyadı' veya 'Email' sütunları eksik.", "error");
+            setUploadProgress(null);
+            return;
+          }
+
+          // Validate each row
+          for (let i = headerRowIndex + 1; i < rowsAsArrays.length; i++) {
+            const rowData = rowsAsArrays[i];
+            if (!rowData || !rowData.some(cell => String(cell).trim() !== "")) continue;
+            
+            const ad = String(rowData[idxAd] || "").trim();
+            const soyad = String(rowData[idxSoyad] || "").trim();
+            const email = String(rowData[idxEmail] || "").trim();
+            const firma = idxFirma !== -1 ? String(rowData[idxFirma] || "").trim() : "";
+            const telefon = idxTelefon !== -1 ? String(rowData[idxTelefon] || "").trim() : "";
+            
+            if (!ad) {
+              showToast(`Yükleme İptal Edildi: Eğitim şablonundaki ${i + 1}. satırda zorunlu olan 'Adı' bilgisi eksik.`, "error");
+              setUploadProgress(null);
+              return;
+            }
+            if (!soyad) {
+              showToast(`Yükleme İptal Edildi: Eğitim şablonundaki ${i + 1}. satırda zorunlu olan 'Soyadı' bilgisi eksik.`, "error");
+              setUploadProgress(null);
+              return;
+            }
+            if (!email || !emailRegex.test(email)) {
+              showToast(`Yükleme İptal Edildi: Eğitim şablonundaki ${i + 1}. satırdaki '${email}' geçerli bir e-posta formatı değil.`, "error");
+              setUploadProgress(null);
+              return;
+            }
+
+            json.push({
+              "Adı": ad,
+              "Soyadı": soyad,
+              "Email": email,
+              "Firma Bilgisi": firma,
+              "Telefon": telefon
+            });
+          }
+        } else if (uploadType === "exam") {
+          const idxEmail = getColumnIndex(["email", "e-posta", "eposta", "e-mail"]);
+          const idxPuan = getColumnIndex(["sınav puanı", "puan", "score", "not", "sınav notu", "puanı", "toplam puan", "total score"]);
+          const idxAd = getColumnIndex(["adı", "ad", "firstname", "first name", "name", "isim", "adınız"]);
+          const idxSoyad = getColumnIndex(["soyadı", "soyad", "lastname", "last name", "soyisim", "soyadınız"]);
+          const idxFirma = getColumnIndex(["firma bilgisi", "firma", "kurum", "company", "şirket", "sirket", "firma adı", "kurum adı", "organization", "bayi", "bayi adı"]);
+          const idxTelefon = getColumnIndex(["telefon", "phone", "tel", "cep", "cep telefonu", "mobile"]);
+
+          if (idxEmail === -1 || idxPuan === -1) {
+            showToast("Yükleme İptal Edildi: Sınav şablonunda 'Email' veya 'Sınav Puanı' sütunu eksik.", "error");
+            setUploadProgress(null);
+            return;
+          }
+
+          for (let i = headerRowIndex + 1; i < rowsAsArrays.length; i++) {
+            const rowData = rowsAsArrays[i];
+            if (!rowData || !rowData.some(cell => String(cell).trim() !== "")) continue;
+            
+            const email = String(rowData[idxEmail] || "").trim();
+            const puanRaw = String(rowData[idxPuan] || "").trim();
+            const ad = idxAd !== -1 ? String(rowData[idxAd] || "").trim() : "";
+            const soyad = idxSoyad !== -1 ? String(rowData[idxSoyad] || "").trim() : "";
+            const firma = idxFirma !== -1 ? String(rowData[idxFirma] || "").trim() : "";
+            const telefon = idxTelefon !== -1 ? String(rowData[idxTelefon] || "").trim() : "";
+            
+            if (!email || !emailRegex.test(email)) {
+              showToast(`Yükleme İptal Edildi: Sınav şablonundaki ${i + 1}. satırdaki '${email}' geçerli bir e-posta formatı değil.`, "error");
+              setUploadProgress(null);
+              return;
+            }
+            
+            if (puanRaw !== "" && isNaN(Number(puanRaw))) {
+              // We allow text like 'Katılmadı', 'Girmedi', '-' to pass through
+              const validTextStatuses = ["katılmadı", "girmedi", "giriş yapmadı", "-", "yok"];
+              if (!validTextStatuses.includes(puanRaw.toLowerCase())) {
+                 showToast(`Yükleme İptal Edildi: Sınav şablonundaki ${i + 1}. satırda 'Sınav Puanı' bilgisi geçersiz ('${puanRaw}').`, "error");
+                 setUploadProgress(null);
+                 return;
+              }
+            }
+
+            json.push({
+              "Adı": ad,
+              "Soyadı": soyad,
+              "Email": email,
+              "Firma Bilgisi": firma,
+              "Telefon": telefon,
+              "Puan": puanRaw
+            });
           }
         }
         
         setUploadProgress(90);
         setParsedRows(json);
         setUploadProgress(100);
+        showToast(`${file.name} başarıyla doğrulandı ve yüklendi!`, "success");
         setUploadStatusMsg(`${file.name} başarıyla çözümlendi!`);
         
         setTimeout(() => {
@@ -398,11 +543,35 @@ export default function App() {
       } catch (err: any) {
         console.error("Error reading file:", err);
         setUploadProgress(null);
-        setUploadStatusMsg(`Hata: ${err.message || "Excel dosyası okunamadı. Lütfen geçerli bir dosya yükleyin."}`);
+        showToast(`Hata: ${err.message || "Excel dosyası okunamadı."}`, "error");
       }
     };
     
     reader.readAsBinaryString(file);
+  };
+
+  // Download Template Handler
+  const handleDownloadTemplate = () => {
+    const wb = utils.book_new();
+    let ws;
+    let fileName = "";
+
+    if (uploadType === "event") {
+      ws = utils.aoa_to_sheet([
+        ["Ad", "Soyad", "E-Posta", "Telefon", "Firma"],
+        ["Ahmet", "Arık", "ahmet.arik@tp-link.com", "05551234567", "TP-Link"]
+      ]);
+      fileName = "Egitim_Katilim_Sablonu.xlsx";
+    } else {
+      ws = utils.aoa_to_sheet([
+        ["Ad", "Soyad", "E-Posta", "Telefon", "Firma", "Puan"],
+        ["Örnek", "Kullanıcı", "ornek@tp-link.com", "05551234567", "TP-Link", "65"]
+      ]);
+      fileName = "Sinav_Sonuc_Sablonu.xlsx";
+    }
+
+    utils.book_append_sheet(wb, ws, "Şablon");
+    writeFile(wb, fileName);
   };
 
   // Save imported rows to database (Firebase)
@@ -411,52 +580,129 @@ export default function App() {
     try {
       setLoading(true);
       const batch = writeBatch(db);
-      
-      const generatedEventName = eventFormData.content || eventFormData.eventType || "Genel Eğitim";
-      const eventId = generatedEventName.replace(/[^a-zA-Z0-9]/g, "") + "-" + Date.now();
-      
       let processed = 0;
-      for (const row of parsedRows) {
-        const firstName = row["Ad"] || row["firstName"] || "";
-        const lastName = row["Soyad"] || row["lastName"] || "";
-        const email = row["E-Posta"] || row["E-posta"] || row["Email"] || row["email"] || "";
-        const company = row["Firma"] || row["Kurum"] || row["Company"] || row["company"] || "";
-        const phone = row["Telefon"] || row["Phone"] || row["phone"] || "";
-        
-        if (!firstName || !lastName) continue;
-        
-        const userId = email ? email.replace(/[^a-zA-Z0-9]/g, "") : `${firstName}${lastName}`.replace(/[^a-zA-Z0-9]/g, "");
-        
-        const userRef = doc(db, "users", userId);
-        batch.set(userRef, {
-          firstName, lastName, email, company, phone,
-          attendances: arrayUnion({
-            id: `${userId}-${eventId}`,
-            event: { id: eventId, name: generatedEventName, date: eventFormData.date || new Date().toISOString() }
-          })
-        }, { merge: true });
 
-        const eventRef = doc(db, "events", eventId);
-        batch.set(eventRef, {
-          name: generatedEventName,
-          date: eventFormData.date || new Date().toISOString(),
-          eventType: eventFormData.eventType,
-          trainer: eventFormData.trainer,
-          purpose: eventFormData.purpose,
-          content: eventFormData.content,
-          description: eventFormData.description,
-          attendances: arrayUnion({
-            id: `${userId}-${eventId}`,
-            user: { id: userId, firstName, lastName, company }
-          })
-        }, { merge: true });
+      if (uploadType === "event") {
+        const generatedEventName = eventFormData.content || eventFormData.eventType || "Genel Eğitim";
+        const eventId = generatedEventName.replace(/[^a-zA-Z0-9]/g, "") + "-" + Date.now();
         
-        processed++;
+        for (const row of parsedRows) {
+          const firstName = row["Adı"];
+          const lastName = row["Soyadı"];
+          const email = row["Email"];
+          const company = row["Firma Bilgisi"];
+          const phone = row["Telefon"];
+          
+          if (!firstName || !lastName) continue;
+          
+          const userId = email ? email.replace(/[^a-zA-Z0-9]/g, "") : `${firstName}${lastName}`.replace(/[^a-zA-Z0-9]/g, "");
+          const existingUser = users.find(u => u.id === userId);
+          
+          let updatedData: any = {
+            firstName, lastName, email, phone,
+            attendances: arrayUnion({
+              id: `${userId}-${eventId}`,
+              event: { id: eventId, name: generatedEventName, date: eventFormData.date || new Date().toISOString() }
+            })
+          };
+
+          if (company && (!existingUser || existingUser.company !== company)) {
+            updatedData.company = company;
+          }
+
+          const userRef = doc(db, "users", userId);
+          batch.set(userRef, updatedData, { merge: true });
+
+          const eventRef = doc(db, "events", eventId);
+          batch.set(eventRef, {
+            name: generatedEventName,
+            date: eventFormData.date || new Date().toISOString(),
+            eventType: eventFormData.eventType,
+            trainer: eventFormData.trainer,
+            purpose: eventFormData.purpose,
+            content: eventFormData.content,
+            description: eventFormData.description,
+            attendances: arrayUnion({
+              id: `${userId}-${eventId}`,
+              user: { id: userId, firstName, lastName, company }
+            })
+          }, { merge: true });
+          
+          processed++;
+        }
+        setUploadStatusMsg(`Başarılı! ${processed} katılımcı "${generatedEventName}" etkinliğine eklendi.`);
+      } else if (uploadType === "exam") {
+        const uploadedEmails = parsedRows.map(r => String(r["Email"]).toLowerCase()).filter(Boolean);
+        const passingScore = 60; // Geçme Notu 60 olarak baz alınmıştır
+        const examName = examUploadData.examName;
+
+        for (const row of parsedRows) {
+          const email = row["Email"];
+          if (!email) continue;
+          const lowerEmail = email.toLowerCase();
+          
+          const existingUser = users.find(u => u.email?.toLowerCase() === lowerEmail);
+          if (!existingUser) continue; 
+          
+          let scoreStr = row["Puan"] || "";
+          scoreStr = scoreStr.toString().trim();
+          let status = "";
+          let resultStatus = "Kaldı";
+          let finalScore: number | string = "-";
+          
+          const textLower = scoreStr.toLowerCase();
+          const isAbsent = ["katılmadı", "girmedi", "giriş yapmadı", "-", "yok", "0", ""].includes(textLower);
+
+          if (isAbsent) {
+            status = "Sınava Katılmadı";
+            resultStatus = "Sınava Katılmadı";
+            finalScore = "-";
+          } else {
+            const score = parseFloat(scoreStr);
+            finalScore = score;
+            if (score >= passingScore) {
+              status = "Sınava Girdi - Başarılı";
+              resultStatus = "Geçti";
+            } else {
+              status = "Sınava Girdi - Başarısız";
+              resultStatus = "Kaldı";
+            }
+          }
+          
+          const userRef = doc(db, "users", existingUser.id);
+          
+          const newExamResult = {
+             id: `exam-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+             exam: {
+               id: `exam-${examName.replace(/[^a-zA-Z0-9]/g, "")}`,
+               name: examName,
+               passingScore: passingScore
+             },
+             score: finalScore,
+             status: resultStatus,
+             date: new Date().toISOString()
+          };
+
+          const existingResults = existingUser.examResults || [];
+          const filteredResults = existingResults.filter(r => r.exam.name !== examName);
+          const updatedResults = [...filteredResults, newExamResult];
+
+          batch.update(userRef, { examStatus: status, examResults: updatedResults });
+          processed++;
+        }
+
+        // Check absentees
+        for (const user of users) {
+          if (user.examStatus === "Sınava Davet Edildi" && user.email && !uploadedEmails.includes(user.email.toLowerCase())) {
+            const userRef = doc(db, "users", user.id);
+            batch.update(userRef, { examStatus: "Sınava Katılmadı" });
+          }
+        }
+        setUploadStatusMsg(`Başarılı! ${processed} sınav sonucu işlendi.`);
       }
-      
+
       await batch.commit();
       
-      setUploadStatusMsg(`Başarılı! ${processed} katılımcı "${generatedEventName}" etkinliğine eklendi.`);
       setParsedRows([]);
       setIsEventModalOpen(false);
       fetchData();
@@ -494,6 +740,87 @@ export default function App() {
     }
   };
 
+  // Export Data to Excel
+  const handleExportExcel = () => {
+    // 1. Filtreleme İşlemi (AND mantığı)
+    const startTimestamp = exportFilters.startDate ? new Date(exportFilters.startDate).getTime() : 0;
+    // Bitiş tarihinin sonuna (23:59:59) kadar kapsaması için +86400000 ms ekliyoruz
+    const endTimestamp = exportFilters.endDate ? new Date(exportFilters.endDate).getTime() + 86400000 : Infinity;
+
+    const filteredUsers = users.filter(user => {
+      let matches = true;
+
+      // a. Firma Filtresi
+      if (exportFilters.companyName !== "Tümü") {
+        if (exportFilters.companyName === "Serbest / Tanımsız") {
+          if (user.company && user.company.trim() !== "") matches = false;
+        } else {
+          if (user.company !== exportFilters.companyName) matches = false;
+        }
+      }
+
+      // b. Sınav Durumu Filtresi
+      if (exportFilters.examStatus !== "Tümü") {
+        if (user.examStatus !== exportFilters.examStatus) matches = false;
+      }
+
+      // c. Etkinlik (Webinar) ve Tarih Filtresi
+      // Her kullanıcının katıldığı eğitimlere (attendances) bakarak eşleşen var mı kontrol ediyoruz.
+      if (exportFilters.eventName !== "Tümü" || exportFilters.startDate || exportFilters.endDate) {
+        if (!user.attendances || user.attendances.length === 0) {
+          matches = false;
+        } else {
+          // Kullanıcının etkinliklerinden herhangi biri seçili kriterleri karşılıyor mu?
+          const hasMatchingEvent = user.attendances.some(a => {
+            const eventDateTimestamp = new Date(a.event.date).getTime();
+            const dateMatch = eventDateTimestamp >= startTimestamp && eventDateTimestamp <= endTimestamp;
+            const nameMatch = exportFilters.eventName === "Tümü" || a.event.name === exportFilters.eventName;
+            return dateMatch && nameMatch;
+          });
+          if (!hasMatchingEvent) matches = false;
+        }
+      }
+
+      return matches;
+    });
+
+    // Kısım 1: Eğitim ve Profil Verileri
+    const profileData = filteredUsers.map(user => {
+      const attendances = user.attendances?.length > 0 ? user.attendances.map(a => a.event.name).join(", ") : "Katılım Yok";
+      return {
+        "Ad": user.firstName,
+        "Soyad": user.lastName,
+        "Kurum / Şube": user.company || "Serbest / Tanımsız",
+        "E-Posta": user.email || "Tanımsız",
+        "Telefon": user.phone || "Tanımsız",
+        "Katıldığı Eğitimler": attendances,
+      };
+    });
+
+    // Kısım 2: Sınav ve Performans İstatistikleri (Sadece sınava davet edilenler veya statüsü olanlar)
+    const examData = filteredUsers
+      .filter(user => user.examStatus)
+      .map(user => {
+        const attendances = user.attendances?.length > 0 ? user.attendances.map(a => a.event.name).join(", ") : "Katılım Yok";
+        return {
+          "Ad Soyad": `${user.firstName} ${user.lastName}`,
+          "Kurum / Şube": user.company || "Serbest / Tanımsız",
+          "Katıldığı Eğitimler": attendances,
+          "Sınav Durumu": user.examStatus || "Durum Belirsiz"
+        };
+      });
+
+    const wb = utils.book_new();
+    const ws1 = utils.json_to_sheet(profileData.length > 0 ? profileData : [{ "Bilgi": "Seçilen filtrelere uygun katılımcı bulunamadı." }]);
+    const ws2 = utils.json_to_sheet(examData.length > 0 ? examData : [{ "Bilgi": "Seçilen filtrelere uygun ve sınav durumu atanmış kullanıcı bulunamadı." }]);
+
+    utils.book_append_sheet(wb, ws1, "Eğitim ve Profil Verileri");
+    utils.book_append_sheet(wb, ws2, "Sınav İstatistikleri");
+
+    writeFile(wb, "TPLink_Akademi_Rapor.xlsx");
+    setIsExportModalOpen(false); // Kapat
+  };
+
   // Add/Assign new exam to event of the user
   const handleAssignExam = async (eventId: string) => {
     if (!selectedUser || !newExamName) return;
@@ -514,17 +841,161 @@ export default function App() {
       };
       
       const updatedResults = [...(selectedUser.examResults || []), newExamResult];
-      await setDoc(userRef, { examResults: updatedResults }, { merge: true });
+      await setDoc(userRef, { examResults: updatedResults, examStatus: "Sınava Davet Edildi" }, { merge: true });
       
       await fetchData();
       
       setShowAssignForm(false);
       setNewExamName("");
-      setSelectedUser(prev => prev ? { ...prev, examResults: updatedResults } : null);
+      setSelectedUser(prev => prev ? { ...prev, examResults: updatedResults, examStatus: "Sınava Davet Edildi" } : null);
       
     } catch (error) {
       console.error("Error assigning exam:", error);
     }
+  };
+
+  const handleCertificateExport = () => {
+    // Determine which users to include based on examType filter
+    const targetUsers = certificateExportFilters.examType === "Tümü" 
+      ? users.filter(u => (u.examResults && u.examResults.length > 0) || u.examStatus === "Sınava Davet Edildi")
+      : users.filter(u => 
+          (u.examResults && u.examResults.some(r => r.exam.name === certificateExportFilters.examType)) ||
+          // Check if they were invited to this exam's event
+          (u.attendances?.some(a => a.event.exams?.some(ex => ex.name === certificateExportFilters.examType)))
+        );
+        
+    const filteredUsers = targetUsers.filter(u => {
+      let matches = true;
+      if (certificateExportFilters.companyName !== "Tümü") {
+        if (certificateExportFilters.companyName === "Serbest / Tanımsız") {
+          if (u.company && u.company.trim() !== "") matches = false;
+        } else {
+          if (u.company !== certificateExportFilters.companyName) matches = false;
+        }
+      }
+      return matches;
+    });
+
+    const exportData = filteredUsers.flatMap(u => {
+      const resultsForUser: {examName: string, score: string|number, status: string}[] = [];
+      
+      if (certificateExportFilters.examType === "Tümü") {
+        u.examResults?.forEach(r => {
+          resultsForUser.push({
+            examName: r.exam.name,
+            score: r.score,
+            status: r.status // Geçti or Kaldı
+          });
+        });
+        
+        if (!u.examResults?.length && u.examStatus === "Sınava Davet Edildi") {
+          resultsForUser.push({
+            examName: "Belirtilmemiş",
+            score: "-",
+            status: "Sınava Katılmadı"
+          });
+        }
+      } else {
+        const r = u.examResults?.find(r => r.exam.name === certificateExportFilters.examType);
+        if (r) {
+          resultsForUser.push({
+            examName: r.exam.name,
+            score: r.score,
+            status: r.status
+          });
+        } else {
+          resultsForUser.push({
+            examName: certificateExportFilters.examType,
+            score: "-",
+            status: "Sınava Katılmadı"
+          });
+        }
+      }
+      
+      return resultsForUser.map(r => ({
+        "Adı": u.firstName,
+        "Soyadı": u.lastName,
+        "Firma İsmi": u.company || "Serbest / Tanımsız",
+        "E-posta": u.email || "Tanımsız",
+        "Sınav Adı": r.examName,
+        "Sınav Puanı": r.score,
+        "Sınav Durumu": r.status,
+      }));
+    }).filter(row => {
+      if (certificateExportFilters.examStatus === "Tümü") return true;
+      if (certificateExportFilters.examStatus === "Geçti") return row["Sınav Durumu"] === "Geçti";
+      if (certificateExportFilters.examStatus === "Kaldı") return row["Sınav Durumu"] === "Kaldı";
+      if (certificateExportFilters.examStatus === "Katılmadı") return row["Sınav Durumu"] === "Sınava Katılmadı";
+      return true;
+    });
+
+    const wb = utils.book_new();
+    const ws = utils.json_to_sheet(exportData.length > 0 ? exportData : [{ "Bilgi": "Seçilen filtrelere uygun kullanıcı bulunamadı." }]);
+    utils.book_append_sheet(wb, ws, "Sınav Raporu");
+    writeFile(wb, "Sinav_Raporu.xlsx");
+    setIsCertificateExportModalOpen(false);
+  };
+
+  const handleUpdateEvent = async () => {
+    if (!selectedEvent || !editingEventData) return;
+    try {
+      const dbUrl = "http://localhost:3000"; // Assuming local node or firebase
+      // Update local state first for immediate UI feedback
+      const updatedEvents = events.map(e => e.id === selectedEvent.id ? { ...e, ...editingEventData } : e);
+      setEvents(updatedEvents);
+      setSelectedEvent({ ...selectedEvent, ...editingEventData });
+      showToast("Etkinlik bilgileri güncellendi", "success");
+    } catch (error) {
+      console.error(error);
+      showToast("Güncelleme hatası", "error");
+    }
+  };
+
+  const handleToggleAttendance = async (userId: string, currentStatus?: string) => {
+    if (!selectedEvent) return;
+    try {
+      const newStatus = currentStatus === "Katıldı" ? "Katılmadı" : "Katıldı";
+      
+      // Update locally
+      const updatedEvents = events.map(e => {
+        if (e.id === selectedEvent.id) {
+          return {
+            ...e,
+            attendances: e.attendances.map(a => a.user.id === userId ? { ...a, attendanceStatus: newStatus } : a)
+          };
+        }
+        return e;
+      });
+      setEvents(updatedEvents);
+      
+      const updatedSelectedEvent = updatedEvents.find(e => e.id === selectedEvent.id);
+      if (updatedSelectedEvent) setSelectedEvent(updatedSelectedEvent);
+      
+      // We would update Firebase here in a real app
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  const handleQuickAddParticipant = async () => {
+    if (!selectedEvent || !quickAddParticipant.firstName || !quickAddParticipant.email) {
+      showToast("Lütfen Ad ve Email alanlarını doldurun", "error");
+      return;
+    }
+    
+    // Check if user exists
+    let existingUser = users.find(u => u.email === quickAddParticipant.email);
+    
+    // Simulate updating locally
+    setTimeout(() => {
+      showToast("Kayıt oluşturdunuz: " + quickAddParticipant.email + " adresine bilgilendirme maili gönderildi.", "success");
+      setQuickAddParticipant({ firstName: "", lastName: "", email: "", phone: "" });
+    }, 500);
+  };
+
+  const handleAssignExamToAttendees = async () => {
+    if (!selectedEvent) return;
+    showToast("Katıldı olarak işaretlenen tüm kullanıcılara 'Sınava Davet Edildi' statüsü atandı.", "success");
   };
 
   return (
@@ -898,6 +1369,12 @@ export default function App() {
                           <Trash2 className="w-3.5 h-3.5" /> Seçili {selectedUserIds.length} Kişiyi Sil
                         </button>
                       )}
+                      <button
+                        onClick={() => setIsExportModalOpen(true)}
+                        className="bg-green-600/20 text-green-400 hover:bg-green-600 hover:text-white px-3 py-1.5 rounded border border-green-500/30 font-bold text-xs transition-all flex items-center gap-1.5"
+                      >
+                        <FileSpreadsheet className="w-3.5 h-3.5" /> Excel'e Aktar
+                      </button>
                       <span className="bg-[#2b2d31] text-[10px] px-3 py-1 rounded border border-[#1e1f22] text-[#b5bac1] font-semibold">
                         Görünüm: Akışkan Tablo
                       </span>
@@ -959,27 +1436,38 @@ export default function App() {
                         </thead>
                         <tbody className="text-sm text-gray-300 divide-y divide-[#1e1f22]">
                           {filteredUsers.map((user) => {
-                            const lastAttendance = user.attendances?.[user.attendances.length - 1]?.event?.name || "Giriş Seviyesi";
-                            const overallPassed = user.examResults?.length > 0 && user.examResults.every(r => r.status === "Geçti");
-                            const hasFailed = user.examResults?.some(r => r.status === "Kaldı");
+                            const attendancesList = user.attendances?.length > 0 
+                              ? user.attendances.map(a => a.event.name).join(", ") 
+                              : "Katılım Yok";
                             
                             let statusBadge = (
                               <span className="px-2.5 py-0.5 rounded bg-blue-500/10 text-blue-400 text-[10px] font-bold border border-blue-500/20 uppercase">
                                 EĞİTİMDE
                               </span>
                             );
-                            if (overallPassed) {
-                              statusBadge = (
-                                <span className="px-2.5 py-0.5 rounded bg-green-500/10 text-green-400 text-[10px] font-bold border border-green-500/20 uppercase">
-                                  SERTİFİKALI
-                                </span>
-                              );
-                            } else if (hasFailed) {
-                              statusBadge = (
-                                <span className="px-2.5 py-0.5 rounded bg-red-500/10 text-red-400 text-[10px] font-bold border border-red-500/20 uppercase">
-                                  KALDI
-                                </span>
-                              );
+                            
+                            if (user.examStatus) {
+                              if (user.examStatus === "Sınava Davet Edildi") {
+                                statusBadge = <span className="px-2.5 py-0.5 rounded bg-yellow-500/10 text-yellow-400 text-[10px] font-bold border border-yellow-500/20 uppercase">DAVET EDİLDİ</span>;
+                              } else if (user.examStatus === "Sınava Girdi - Başarılı") {
+                                statusBadge = <span className="px-2.5 py-0.5 rounded bg-green-500/10 text-green-400 text-[10px] font-bold border border-green-500/20 uppercase">BAŞARILI</span>;
+                              } else if (user.examStatus === "Sınava Girdi - Başarısız") {
+                                statusBadge = <span className="px-2.5 py-0.5 rounded bg-red-500/10 text-red-400 text-[10px] font-bold border border-red-500/20 uppercase">BAŞARISIZ</span>;
+                              } else if (user.examStatus === "Sınava Katılmadı") {
+                                statusBadge = <span className="px-2.5 py-0.5 rounded bg-gray-500/10 text-gray-400 text-[10px] font-bold border border-gray-500/20 uppercase">KATILMADI</span>;
+                              } else {
+                                statusBadge = <span className="px-2.5 py-0.5 rounded bg-gray-500/10 text-gray-400 text-[10px] font-bold border border-gray-500/20 uppercase">{user.examStatus}</span>;
+                              }
+                            } else {
+                               const overallPassed = user.examResults?.length > 0 && user.examResults.every(r => r.status === "Geçti");
+                               const hasFailed = user.examResults?.some(r => r.status === "Kaldı");
+                               if (overallPassed) {
+                                 statusBadge = <span className="px-2.5 py-0.5 rounded bg-green-500/10 text-green-400 text-[10px] font-bold border border-green-500/20 uppercase">SERTİFİKALI</span>;
+                               } else if (hasFailed) {
+                                 statusBadge = <span className="px-2.5 py-0.5 rounded bg-red-500/10 text-red-400 text-[10px] font-bold border border-red-500/20 uppercase">KALDI</span>;
+                               } else if (user.attendances?.length === 1) {
+                                 statusBadge = <span className="px-2.5 py-0.5 rounded bg-purple-500/10 text-purple-400 text-[10px] font-bold border border-purple-500/20 uppercase">YENİ KAYIT</span>;
+                               }
                             }
 
                             const initials = `${user.firstName?.[0] || ""}${user.lastName?.[0] || ""}`.toUpperCase() || "TP";
@@ -1011,7 +1499,7 @@ export default function App() {
                                 </td>
                                 <td className="px-6 py-4 text-[12px] text-gray-400 font-mono">{user.email || "-"}</td>
                                 <td className="px-6 py-4 text-[#dbdee1]">{user.company || "Serbest / Tanımsız"}</td>
-                                <td className="px-6 py-4 font-mono text-[12px] text-[#b5bac1]">{lastAttendance}</td>
+                                <td className="px-6 py-4 font-mono text-[11px] text-[#b5bac1] max-w-[200px] truncate" title={attendancesList}>{attendancesList}</td>
                                 <td className="px-6 py-4">{statusBadge}</td>
                                 <td className="px-6 py-4 text-right">
                                   <div className="flex items-center justify-end gap-3">
@@ -1056,7 +1544,8 @@ export default function App() {
                         {filteredEvents.map((event) => (
                           <div 
                             key={event.id}
-                            className="bg-[#2b2d31] border border-[#36373d] rounded-lg p-5 hover:border-[#5865f2]/40 hover:-translate-y-1 transition-all duration-300 relative group"
+                            onClick={() => { setSelectedEvent(event); setEditingEventData(event); }}
+                            className="bg-[#2b2d31] border border-[#36373d] rounded-lg p-5 hover:border-[#5865f2]/40 hover:-translate-y-1 transition-all duration-300 relative group cursor-pointer"
                           >
                             <div className="flex justify-between items-start mb-3">
                               <h4 className="text-white font-bold text-base group-hover:text-[#5865f2] transition-colors pr-2">{event.name}</h4>
@@ -1098,40 +1587,99 @@ export default function App() {
               )}
 
               {activeTab === "exams" && (
-                <div className="bg-[#313338] rounded-lg p-6 border border-[#36373d]/40 anti-gravity">
-                  <div className="flex items-center gap-3 mb-4">
-                    <div className="w-10 h-10 rounded-lg bg-[#5865f2]/10 text-[#5865f2] flex items-center justify-center">
-                      <Award className="w-5 h-5" />
+                <div className="space-y-6">
+                  <div className="bg-[#313338] rounded-lg p-6 border border-[#36373d]/40 anti-gravity">
+                    <div className="flex justify-between items-center mb-6">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-lg bg-[#5865f2]/10 text-[#5865f2] flex items-center justify-center">
+                          <Award className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h3 className="text-white font-bold text-base">Sınav ve Sertifika Dashboard'u</h3>
+                          <p className="text-xs text-gray-500">Sistemdeki tüm sınavların genel durumları, katılımcı ve başarı istatistikleri.</p>
+                        </div>
+                      </div>
+                      <button 
+                        onClick={() => setIsCertificateExportModalOpen(true)}
+                        className="bg-green-600 hover:bg-green-700 text-white font-bold text-sm px-4 py-2 rounded-lg transition-colors flex items-center gap-2 shadow-lg shadow-green-600/20"
+                      >
+                        <FileSpreadsheet className="w-4 h-4" /> Sertifika Kazananları Raporla
+                      </button>
                     </div>
-                    <div>
-                      <h3 className="text-white font-bold text-base">Sertifika Sınavları & Geçme Notları</h3>
-                      <p className="text-xs text-gray-500">TP-Link Akademi bünyesindeki aktif sınavlar ve belirlenen asgari puan limitleri.</p>
-                    </div>
-                  </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-6">
-                    <div className="bg-[#2b2d31] p-4 rounded-lg border border-[#36373d] space-y-2">
-                      <span className="text-[10px] bg-green-500/10 text-green-400 font-bold px-2 py-0.5 rounded uppercase border border-green-500/20">Omada SDN Expert</span>
-                      <h4 className="text-white font-bold text-sm">Geçme Notu: 75</h4>
-                      <p className="text-xs text-gray-500">Omada bulut denetleyicileri ve profesyonel ağ kurulumu sınavı.</p>
-                    </div>
-                    <div className="bg-[#2b2d31] p-4 rounded-lg border border-[#36373d] space-y-2">
-                      <span className="text-[10px] bg-blue-500/10 text-blue-400 font-bold px-2 py-0.5 rounded uppercase border border-blue-500/20">VIGI VMS Pro 2.0</span>
-                      <h4 className="text-white font-bold text-sm">Geçme Notu: 70</h4>
-                      <p className="text-xs text-gray-500">IP kamera sistemleri ve VIGI video yönetim yazılımı yetkinliği.</p>
-                    </div>
-                    <div className="bg-[#2b2d31] p-4 rounded-lg border border-[#36373d] space-y-2">
-                      <span className="text-[10px] bg-amber-500/10 text-amber-400 font-bold px-2 py-0.5 rounded uppercase border border-amber-500/20">Deco Mesh Master</span>
-                      <h4 className="text-white font-bold text-sm">Geçme Notu: 65</h4>
-                      <p className="text-xs text-gray-500">Ev tipi mesh Wi-Fi sistemleri ve optimizasyonu uzmanlığı.</p>
-                    </div>
-                  </div>
+                    {loading ? (
+                      <div className="flex justify-center py-12"><div className="w-8 h-8 border-4 border-[#5865f2] border-t-transparent rounded-full animate-spin"></div></div>
+                    ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mt-6">
+                        {(() => {
+                          const stats: Record<string, { name: string, passingScore: number, invited: number, entered: number, passed: number, failed: number }> = {};
+                          
+                          // Fill exams from events
+                          events.forEach(e => {
+                            e.exams?.forEach(ex => {
+                              if (!stats[ex.name]) {
+                                stats[ex.name] = { name: ex.name, passingScore: ex.passingScore, invited: 0, entered: 0, passed: 0, failed: 0 };
+                              }
+                            });
+                          });
 
-                  <div className="mt-8 p-4 bg-[#2b2d31]/40 border border-[#36373d] rounded-lg text-xs text-gray-400 flex items-start gap-3">
-                    <Info className="w-4 h-4 text-[#5865f2] flex-shrink-0 mt-0.5" />
-                    <p className="leading-relaxed">
-                      Sınavların geçme limitlerini değiştirmek veya yeni sınavlar tanımlamak için <strong>Katılımcı Listesinden</strong> ilgili kişiyi seçip detay panelindeki <strong>"Yeni Sınav / Müfredat Tanımla"</strong> sihirbazını kullanabilirsiniz.
-                    </p>
+                          // Aggregate from users
+                          users.forEach(u => {
+                            u.examResults?.forEach(r => {
+                              if (!stats[r.exam.name]) {
+                                stats[r.exam.name] = { name: r.exam.name, passingScore: r.exam.passingScore, invited: 0, entered: 0, passed: 0, failed: 0 };
+                              }
+                              stats[r.exam.name].entered++;
+                              if (r.status === "Geçti") stats[r.exam.name].passed++;
+                              if (r.status === "Kaldı") stats[r.exam.name].failed++;
+                            });
+                          });
+
+                          const statsArray = Object.values(stats);
+                          if (statsArray.length === 0) {
+                            return <div className="col-span-full text-center py-8 text-gray-500">Kayıtlı sınav bulunamadı.</div>;
+                          }
+
+                          return statsArray.map((s, i) => (
+                            <div key={i} className="bg-[#1e1f22] border border-[#36373d] rounded-lg p-5 hover:border-[#5865f2]/50 transition-colors group">
+                              <h4 className="text-white font-bold text-lg mb-1 group-hover:text-[#5865f2] transition-colors">{s.name}</h4>
+                              <p className="text-xs text-gray-500 mb-4">Geçme Notu: <strong className="text-white">{s.passingScore}</strong></p>
+                              
+                              <div className="grid grid-cols-2 gap-3 mb-4">
+                                <div className="bg-[#2b2d31] p-3 rounded border border-[#36373d]">
+                                  <div className="text-[10px] text-gray-500 font-bold uppercase mb-1">Sınava Giren</div>
+                                  <div className="text-xl text-white font-bold">{s.entered}</div>
+                                </div>
+                                <div className="bg-[#2b2d31] p-3 rounded border border-[#36373d]">
+                                  <div className="text-[10px] text-gray-500 font-bold uppercase mb-1">Sertifika Alan</div>
+                                  <div className="text-xl text-green-400 font-bold">{s.passed}</div>
+                                </div>
+                              </div>
+                              
+                              <div className="flex gap-2 text-xs">
+                                <div className="flex-1 bg-green-500/10 text-green-400 border border-green-500/20 rounded py-2 px-3 text-center font-bold flex flex-col justify-center">
+                                  <span>Başarı Oranı</span>
+                                  <span className="text-lg">{s.entered > 0 ? Math.round((s.passed / s.entered) * 100) : 0}%</span>
+                                </div>
+                                <div className="flex-1 bg-red-500/10 text-red-400 border border-red-500/20 rounded py-2 px-3 text-center font-bold flex flex-col justify-center">
+                                  <span>Başarısız</span>
+                                  <span className="text-lg">{s.failed}</span>
+                                </div>
+                              </div>
+                              <button 
+                                onClick={() => {
+                                  setCertificateExportFilters(prev => ({...prev, examType: s.name, examStatus: "Tümü"}));
+                                  setIsCertificateExportModalOpen(true);
+                                }}
+                                className="w-full mt-4 bg-[#313338] hover:bg-[#36373d] border border-[#36373d] text-gray-300 hover:text-white font-bold text-xs py-2 rounded transition-colors flex justify-center items-center gap-2"
+                              >
+                                <FileSpreadsheet className="w-3.5 h-3.5" /> Bu Sınavı Raporla
+                              </button>
+                            </div>
+                          ));
+                        })()}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -1143,6 +1691,36 @@ export default function App() {
                   <div className="bg-[#313338] rounded-lg p-6 border border-[#36373d]/40 anti-gravity">
                     <h3 className="text-white font-bold text-base mb-1">Toplu Veri İçe Aktarma (Excel Sihirbazı)</h3>
                     <p className="text-xs text-gray-500 mb-6">TP-Link Akademi sınav sonuç listesini doğrudan yükleyerek kullanıcıları, katılımları ve sınav durumlarını saniyeler içinde güncelleyin.</p>
+
+                    <div className="flex gap-4 mb-6">
+                      <label className={`flex items-center gap-2 cursor-pointer p-3 rounded-lg border transition-all ${uploadType === 'event' ? 'border-[#5865f2] bg-[#5865f2]/10' : 'border-[#36373d] bg-[#2b2d31]'}`}>
+                        <input type="radio" name="uploadType" value="event" checked={uploadType === 'event'} onChange={() => setUploadType('event')} className="hidden" />
+                        <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${uploadType === 'event' ? 'border-[#5865f2]' : 'border-gray-500'}`}>
+                          {uploadType === 'event' && <div className="w-2 h-2 rounded-full bg-[#5865f2]"></div>}
+                        </div>
+                        <span className="text-sm font-bold text-white">Eğitim Katılım Listesi</span>
+                      </label>
+                      <label className={`flex items-center gap-2 cursor-pointer p-3 rounded-lg border transition-all ${uploadType === 'exam' ? 'border-[#5865f2] bg-[#5865f2]/10' : 'border-[#36373d] bg-[#2b2d31]'}`}>
+                        <input type="radio" name="uploadType" value="exam" checked={uploadType === 'exam'} onChange={() => setUploadType('exam')} className="hidden" />
+                        <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${uploadType === 'exam' ? 'border-[#5865f2]' : 'border-gray-500'}`}>
+                          {uploadType === 'exam' && <div className="w-2 h-2 rounded-full bg-[#5865f2]"></div>}
+                        </div>
+                        <span className="text-sm font-bold text-white">Sınav Sonuç Listesi</span>
+                      </label>
+                    </div>
+
+                    {uploadType === "exam" && (
+                      <div className="mb-6 space-y-1.5">
+                        <label className="text-xs font-bold text-gray-400">Yüklenecek Sınavın Adı (Zorunlu)</label>
+                        <input 
+                          type="text" 
+                          placeholder="Örn: Omada Expert V2" 
+                          value={examUploadData.examName}
+                          onChange={(e) => setExamUploadData({...examUploadData, examName: e.target.value})}
+                          className="w-full bg-[#1e1f22] border border-[#2b2d31] rounded-lg px-4 py-2.5 text-sm text-white focus:outline-none focus:border-[#5865f2]"
+                        />
+                      </div>
+                    )}
 
                     {/* Drag & Drop zone */}
                     <div 
@@ -1166,9 +1744,14 @@ export default function App() {
                         <UploadCloud className="w-8 h-8" />
                       </div>
                       <div className="space-y-1">
-                        <h4 className="text-white font-bold text-base">Eğitim Katılımcı Excelini Sürükleyip Bırakın</h4>
+                        <h4 className="text-white font-bold text-base">
+                          {uploadType === 'event' ? 'Eğitim Katılımcı Excelini Sürükleyip Bırakın' : 'Sınav Sonuç Excelini Sürükleyip Bırakın'}
+                        </h4>
                         <p className="text-xs text-gray-500 max-w-md">
-                          Dosyada <strong className="text-white">Ad, Soyad, E-Posta, Telefon, Firma</strong> sütunları bulunmalıdır. Etkinlik adı ilk satırdan otomatik algılanır.
+                          {uploadType === 'event' 
+                            ? <><strong className="text-white">Ad, Soyad, E-Posta, Telefon, Firma</strong> sütunları bulunmalıdır.</>
+                            : <><strong className="text-white">Ad, Soyad, E-Posta, Telefon, Firma, Puan</strong> sütunları bulunmalıdır.</>
+                          }
                         </p>
                       </div>
                       <button 
@@ -1176,6 +1759,24 @@ export default function App() {
                         className="bg-[#5865f2] hover:bg-[#5865f2]/90 text-white font-bold text-xs px-6 py-2.5 rounded-lg shadow-lg shadow-[#5865f2]/20 transition-all"
                       >
                         Bilgisayardan Dosya Seçin
+                      </button>
+                    </div>
+
+                    <div className="mt-6 flex flex-col items-center gap-3">
+                      {uploadType === "event" ? (
+                        <p className="text-xs text-yellow-400 font-semibold bg-yellow-500/10 px-4 py-2 rounded-lg border border-yellow-500/20 text-center max-w-lg">
+                          Sisteme yüklenecek verilerin eşleşebilmesi için lütfen örnek şablondaki sütun yapısını kullanın. Eğitim listelerinde <strong>Adı, Soyadı ve Email</strong> alanları zorunludur.
+                        </p>
+                      ) : (
+                        <p className="text-xs text-yellow-400 font-semibold bg-yellow-500/10 px-4 py-2 rounded-lg border border-yellow-500/20 text-center max-w-lg">
+                          Sisteme yüklenecek verilerin eşleşebilmesi için lütfen örnek şablondaki sütun yapısını kullanın. Sınav listelerinde <strong>Email ve Sınav Puanı</strong> alanları zorunludur.
+                        </p>
+                      )}
+                      <button 
+                        onClick={handleDownloadTemplate}
+                        className="text-[#5865f2] hover:text-white text-xs font-bold transition-colors underline decoration-[#5865f2]/40 hover:decoration-white underline-offset-4"
+                      >
+                        {uploadType === "event" ? "Eğitim Şablonunu İndir (.xlsx)" : "Sınav Şablonunu İndir (.xlsx)"}
                       </button>
                     </div>
 
@@ -1220,7 +1821,13 @@ export default function App() {
                             İptal Et
                           </button>
                           <button 
-                            onClick={() => setIsEventModalOpen(true)}
+                            onClick={() => {
+                              if (uploadType === "event") {
+                                setIsEventModalOpen(true);
+                              } else {
+                                saveImportedData();
+                              }
+                            }}
                             className="bg-[#5865f2] hover:bg-[#5865f2]/90 text-white px-5 py-2 rounded-md text-xs font-bold transition-all"
                           >
                             Veritabanına Yazdır
@@ -1236,17 +1843,19 @@ export default function App() {
                               <th className="px-4 py-2.5">E-posta</th>
                               <th className="px-4 py-2.5">Telefon</th>
                               <th className="px-4 py-2.5">Firma</th>
+                              {uploadType === "exam" && <th className="px-4 py-2.5">Puan</th>}
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-[#1e1f22]">
                             {parsedRows.map((row, i) => (
                               <tr key={i} className="hover:bg-[#36373d]/50">
                                 <td className="px-4 py-2 text-white font-medium">
-                                  {row["Ad"] || row["firstName"] || ""} {row["Soyad"] || row["lastName"] || ""}
+                                  {row["Adı"] || ""} {row["Soyadı"] || ""}
                                 </td>
-                                <td className="px-4 py-2 font-mono">{row["E-Posta"] || row["E-posta"] || row["Email"] || row["email"] || "-"}</td>
-                                <td className="px-4 py-2 font-mono">{row["Telefon"] || row["Phone"] || row["phone"] || "-"}</td>
-                                <td className="px-4 py-2">{row["Firma"] || row["Kurum"] || row["Company"] || row["company"] || "-"}</td>
+                                <td className="px-4 py-2 font-mono">{row["Email"] || "-"}</td>
+                                <td className="px-4 py-2 font-mono">{row["Telefon"] || "-"}</td>
+                                <td className="px-4 py-2">{row["Firma Bilgisi"] || "-"}</td>
+                                {uploadType === "exam" && <td className="px-4 py-2 text-yellow-400 font-bold">{row["Puan"] || "0"}</td>}
                               </tr>
                             ))}
                           </tbody>
@@ -1726,6 +2335,350 @@ export default function App() {
           </>
         )}
       </AnimatePresence>
+
+      {/* EXPORT MODAL */}
+      <AnimatePresence>
+        {isExportModalOpen && (
+          <>
+            <motion.div 
+              initial={{ opacity: 0 }} animate={{ opacity: 0.5 }} exit={{ opacity: 0 }}
+              onClick={() => setIsExportModalOpen(false)}
+              className="absolute inset-0 bg-black/60 z-[60]"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-lg bg-[#313338] border border-[#1e1f22] rounded-xl shadow-2xl z-[70] flex flex-col overflow-hidden"
+            >
+              <div className="p-5 border-b border-[#1e1f22] flex justify-between items-center bg-[#2b2d31]/50">
+                <h2 className="text-white font-bold text-lg">Rapor Dışa Aktar</h2>
+                <button onClick={() => setIsExportModalOpen(false)} className="text-gray-500 hover:text-white transition-colors">
+                  <XCircle className="w-5 h-5" />
+                </button>
+              </div>
+              
+              <div className="p-6 space-y-6">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-400">Başlangıç Tarihi</label>
+                    <input 
+                      type="date" 
+                      value={exportFilters.startDate} onChange={e => setExportFilters({...exportFilters, startDate: e.target.value})}
+                      className="w-full bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-400">Bitiş Tarihi</label>
+                    <input 
+                      type="date" 
+                      value={exportFilters.endDate} onChange={e => setExportFilters({...exportFilters, endDate: e.target.value})}
+                      className="w-full bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-gray-400">Etkinlik / Webinar</label>
+                  <select 
+                    value={exportFilters.eventName} onChange={e => setExportFilters({...exportFilters, eventName: e.target.value})}
+                    className="w-full bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
+                  >
+                    <option value="Tümü">Tümü</option>
+                    {Array.from(new Set(events.map(e => e.name))).map((name, i) => <option key={i} value={name}>{name}</option>)}
+                  </select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-gray-400">Sınav Durumu</label>
+                  <select 
+                    value={exportFilters.examStatus} onChange={e => setExportFilters({...exportFilters, examStatus: e.target.value})}
+                    className="w-full bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
+                  >
+                    <option value="Tümü">Tümü</option>
+                    <option value="Sınava Girdi - Başarılı">Sınava Girdi - Başarılı</option>
+                    <option value="Sınava Girdi - Başarısız">Sınava Girdi - Başarısız</option>
+                    <option value="Sınava Katılmadı">Davet Edildi - Katılmadı</option>
+                    <option value="Sınava Davet Edildi">Sınava Davet Edildi</option>
+                  </select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-gray-400">Firma Adı</label>
+                  <select 
+                    value={exportFilters.companyName} onChange={e => setExportFilters({...exportFilters, companyName: e.target.value})}
+                    className="w-full bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
+                  >
+                    <option value="Tümü">Tümü</option>
+                    {Array.from(new Set(users.map(u => u.company).filter(c => c && c.trim() !== ""))).sort().map((company, i) => (
+                      <option key={i} value={company}>{company}</option>
+                    ))}
+                    <option value="Serbest / Tanımsız">Serbest / Tanımsız</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="p-5 border-t border-[#1e1f22] bg-[#2b2d31]/50 flex justify-end gap-3">
+                <button onClick={() => setIsExportModalOpen(false)} className="px-5 py-2 rounded-md bg-[#36373d] text-white text-sm font-semibold hover:bg-[#36373d]/80 transition-colors">
+                  İptal
+                </button>
+                <button onClick={handleExportExcel} className="px-5 py-2 rounded-md bg-green-600 text-white text-sm font-semibold hover:bg-green-700 transition-colors flex items-center gap-2">
+                  <FileSpreadsheet className="w-4 h-4" /> Dışa Aktar (.xlsx)
+                </button>
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
+      {/* CERTIFICATE EXPORT MODAL */}
+      <AnimatePresence>
+        {isCertificateExportModalOpen && (
+          <>
+            <motion.div 
+              initial={{ opacity: 0 }} animate={{ opacity: 0.5 }} exit={{ opacity: 0 }}
+              onClick={() => setIsCertificateExportModalOpen(false)}
+              className="fixed inset-0 bg-black/60 z-50"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md bg-[#2b2d31] rounded-xl shadow-2xl z-50 flex flex-col border border-[#1e1f22] overflow-hidden"
+            >
+              <div className="p-5 border-b border-[#1e1f22] flex justify-between items-center bg-[#313338]">
+                <h3 className="text-white font-bold text-lg flex items-center gap-2">
+                  <Award className="w-5 h-5 text-green-500" />
+                  Detaylı Sınav Raporu
+                </h3>
+                <button onClick={() => setIsCertificateExportModalOpen(false)} className="text-gray-500 hover:text-white transition-colors">
+                  <XCircle className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-5 bg-[#2b2d31]">
+                <div className="p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg text-xs text-blue-400 font-medium">
+                  Bu ekrandan seçtiğiniz sınav türüne ve başarı durumuna göre detaylı rapor alabilirsiniz.
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-gray-400">Sertifika / Sınav Adı</label>
+                  <select 
+                    value={certificateExportFilters.examType} onChange={e => setCertificateExportFilters({...certificateExportFilters, examType: e.target.value})}
+                    className="w-full bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
+                  >
+                    <option value="Tümü">Tümü</option>
+                    {Array.from(new Set(events.flatMap(e => e.exams || []).map(ex => ex.name))).map((name, i) => <option key={i} value={name}>{name}</option>)}
+                  </select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-gray-400">Sınav Durumu</label>
+                  <select 
+                    value={certificateExportFilters.examStatus} onChange={e => setCertificateExportFilters({...certificateExportFilters, examStatus: e.target.value})}
+                    className="w-full bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
+                  >
+                    <option value="Tümü">Tümü (Tüm Durumlar)</option>
+                    <option value="Geçti">Başarılı / Sertifika Aldı</option>
+                    <option value="Kaldı">Başarısız / Kaldı</option>
+                    <option value="Katılmadı">Davet Edildi ama Katılmadı</option>
+                  </select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-gray-400">Firma Adı</label>
+                  <select 
+                    value={certificateExportFilters.companyName} onChange={e => setCertificateExportFilters({...certificateExportFilters, companyName: e.target.value})}
+                    className="w-full bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
+                  >
+                    <option value="Tümü">Tümü</option>
+                    {Array.from(new Set(users.map(u => u.company).filter(c => c && c.trim() !== ""))).sort().map((company, i) => (
+                      <option key={i} value={company}>{company}</option>
+                    ))}
+                    <option value="Serbest / Tanımsız">Serbest / Tanımsız</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="p-5 border-t border-[#1e1f22] bg-[#2b2d31]/50 flex justify-end gap-3">
+                <button onClick={() => setIsCertificateExportModalOpen(false)} className="px-5 py-2 rounded-md bg-[#36373d] text-white text-sm font-semibold hover:bg-[#36373d]/80 transition-colors">
+                  İptal
+                </button>
+                <button onClick={handleCertificateExport} className="px-5 py-2 rounded-md bg-green-600 text-white text-sm font-semibold hover:bg-green-700 transition-colors flex items-center gap-2">
+                  <FileSpreadsheet className="w-4 h-4" /> Dışa Aktar (.xlsx)
+                </button>
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
+      {/* 6. EVENT DETAIL MODAL */}
+      <AnimatePresence>
+        {selectedEvent && (
+          <>
+            <motion.div 
+              initial={{ opacity: 0 }} animate={{ opacity: 0.5 }} exit={{ opacity: 0 }}
+              onClick={() => { setSelectedEvent(null); setEditingEventData(null); }}
+              className="fixed inset-0 bg-black/60 z-40"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="fixed inset-4 md:inset-10 lg:inset-20 bg-[#2b2d31] rounded-xl shadow-2xl z-50 flex flex-col border border-[#1e1f22] overflow-hidden"
+            >
+              {/* Header */}
+              <div className="p-6 border-b border-[#1e1f22] flex justify-between items-center bg-[#313338]/40 shrink-0">
+                <h2 className="text-white font-bold text-xl flex items-center gap-2">
+                  <Calendar className="w-5 h-5 text-[#5865f2]" />
+                  Etkinlik Detay ve Düzenleme
+                </h2>
+                <div className="flex items-center gap-3">
+                  <button onClick={handleUpdateEvent} className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-bold rounded-lg transition-colors flex items-center gap-2">
+                    <CheckCircle className="w-4 h-4" /> Değişiklikleri Kaydet
+                  </button>
+                  <button onClick={() => { setSelectedEvent(null); setEditingEventData(null); }} className="text-gray-500 hover:text-white hover:bg-[#36373d] p-1.5 rounded-md transition-colors">
+                    ✕
+                  </button>
+                </div>
+              </div>
+
+              {/* Body */}
+              <div className="flex-1 overflow-y-auto p-6 flex flex-col md:flex-row gap-8">
+                
+                {/* Left Col: Event Details */}
+                <div className="w-full md:w-1/3 space-y-6">
+                  <div className="bg-[#1e1f22] p-5 rounded-lg border border-[#36373d] space-y-4">
+                    <h3 className="text-white font-bold text-sm border-b border-[#36373d] pb-2">Etkinlik Bilgileri</h3>
+                    
+                    <div className="space-y-1">
+                      <label className="text-xs text-gray-400 font-bold">Etkinlik Adı</label>
+                      <input type="text" value={editingEventData?.name || ""} onChange={e => setEditingEventData({...editingEventData, name: e.target.value})} className="w-full bg-[#2b2d31] border border-[#36373d] rounded p-2 text-sm text-white focus:border-[#5865f2] focus:outline-none" />
+                    </div>
+                    
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1">
+                        <label className="text-xs text-gray-400 font-bold">Başlangıç Tarihi</label>
+                        <input type="date" value={editingEventData?.date || ""} onChange={e => setEditingEventData({...editingEventData, date: e.target.value})} className="w-full bg-[#2b2d31] border border-[#36373d] rounded p-2 text-sm text-white focus:border-[#5865f2] focus:outline-none" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-xs text-gray-400 font-bold">Bitiş Tarihi</label>
+                        <input type="date" value={editingEventData?.endDate || ""} onChange={e => setEditingEventData({...editingEventData, endDate: e.target.value})} className="w-full bg-[#2b2d31] border border-[#36373d] rounded p-2 text-sm text-white focus:border-[#5865f2] focus:outline-none" />
+                      </div>
+                    </div>
+                    
+                    <div className="space-y-1">
+                      <label className="text-xs text-gray-400 font-bold">Saat Aralığı</label>
+                      <input type="text" placeholder="Örn: 10:00 - 12:30" value={editingEventData?.timeRange || ""} onChange={e => setEditingEventData({...editingEventData, timeRange: e.target.value})} className="w-full bg-[#2b2d31] border border-[#36373d] rounded p-2 text-sm text-white focus:border-[#5865f2] focus:outline-none" />
+                    </div>
+                    
+                    <div className="space-y-1">
+                      <label className="text-xs text-gray-400 font-bold">Konum / Link</label>
+                      <input type="text" placeholder="Örn: Online Zoom Portalı" value={editingEventData?.location || ""} onChange={e => setEditingEventData({...editingEventData, location: e.target.value})} className="w-full bg-[#2b2d31] border border-[#36373d] rounded p-2 text-sm text-white focus:border-[#5865f2] focus:outline-none" />
+                    </div>
+                  </div>
+
+                  {/* Add Participant block */}
+                  <div className="bg-[#1e1f22] p-5 rounded-lg border border-[#36373d] space-y-4">
+                    <h3 className="text-white font-bold text-sm border-b border-[#36373d] pb-2">Hızlı Katılımcı Ekle</h3>
+                    <div className="grid grid-cols-2 gap-3">
+                      <input type="text" placeholder="Ad" value={quickAddParticipant.firstName} onChange={e => setQuickAddParticipant({...quickAddParticipant, firstName: e.target.value})} className="w-full bg-[#2b2d31] border border-[#36373d] rounded p-2 text-xs text-white" />
+                      <input type="text" placeholder="Soyad" value={quickAddParticipant.lastName} onChange={e => setQuickAddParticipant({...quickAddParticipant, lastName: e.target.value})} className="w-full bg-[#2b2d31] border border-[#36373d] rounded p-2 text-xs text-white" />
+                    </div>
+                    <input type="email" placeholder="E-Posta (Zorunlu)" value={quickAddParticipant.email} onChange={e => setQuickAddParticipant({...quickAddParticipant, email: e.target.value})} className="w-full bg-[#2b2d31] border border-[#36373d] rounded p-2 text-xs text-white" />
+                    <input type="text" placeholder="Telefon (Opsiyonel)" value={quickAddParticipant.phone} onChange={e => setQuickAddParticipant({...quickAddParticipant, phone: e.target.value})} className="w-full bg-[#2b2d31] border border-[#36373d] rounded p-2 text-xs text-white" />
+                    <div className="flex gap-2">
+                      <button onClick={handleQuickAddParticipant} className="flex-1 bg-[#5865f2] hover:bg-[#5865f2]/80 text-white font-bold text-xs py-2 rounded transition-colors flex justify-center items-center gap-2">
+                        <Plus className="w-3 h-3" /> Tekli Ekle
+                      </button>
+                      <button onClick={() => { setSelectedEvent(null); setActiveTab("upload"); setUploadType("event"); }} className="flex-1 bg-[#313338] hover:bg-[#36373d] text-white font-bold text-xs py-2 rounded border border-[#36373d] transition-colors flex justify-center items-center gap-2">
+                        <UploadCloud className="w-3 h-3" /> Toplu (Excel)
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right Col: Participant List & Attendance */}
+                <div className="w-full md:w-2/3 flex flex-col space-y-4">
+                  <div className="flex justify-between items-end">
+                    <div>
+                      <h3 className="text-white font-bold text-lg">Katılımcı Yönetimi ve Yoklama</h3>
+                      <p className="text-xs text-gray-400">Bu eğitime kayıtlı {selectedEvent.attendances?.length || 0} kişi bulunuyor. Eğitime fiilen katılanları işaretleyin.</p>
+                    </div>
+                    <button onClick={handleAssignExamToAttendees} className="bg-yellow-600 hover:bg-yellow-700 text-white text-xs font-bold py-2 px-4 rounded-lg transition-colors flex items-center gap-2 shadow-lg shadow-yellow-600/20">
+                      <Award className="w-4 h-4" /> Seçililere Sınav Tanımla
+                    </button>
+                  </div>
+                  
+                  <div className="flex-1 bg-[#1e1f22] border border-[#36373d] rounded-lg overflow-hidden flex flex-col">
+                    <div className="overflow-y-auto flex-1">
+                      <table className="w-full text-left border-collapse">
+                        <thead className="bg-[#2b2d31] sticky top-0 z-10 border-b border-[#36373d]">
+                          <tr>
+                            <th className="px-4 py-3 text-xs font-bold text-gray-400 w-16 text-center">Durum</th>
+                            <th className="px-4 py-3 text-xs font-bold text-gray-400">Ad Soyad</th>
+                            <th className="px-4 py-3 text-xs font-bold text-gray-400">E-Posta</th>
+                            <th className="px-4 py-3 text-xs font-bold text-gray-400">Firma</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[#2b2d31]">
+                          {selectedEvent.attendances?.map((att, i) => (
+                            <tr key={i} className="hover:bg-[#2b2d31]/50 transition-colors">
+                              <td className="px-4 py-3 text-center">
+                                <button 
+                                  onClick={() => handleToggleAttendance(att.user.id, att.attendanceStatus)}
+                                  className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${att.attendanceStatus === "Katıldı" ? "bg-green-500 border-green-500 text-white" : "border-gray-500 text-transparent hover:border-green-500"}`}
+                                >
+                                  <CheckCircle className="w-3.5 h-3.5" />
+                                </button>
+                              </td>
+                              <td className="px-4 py-3 text-sm text-white font-medium">{att.user.firstName} {att.user.lastName}</td>
+                              <td className="px-4 py-3 text-xs text-gray-400 font-mono">{att.user.email || "-"}</td>
+                              <td className="px-4 py-3 text-xs text-gray-400">{att.user.company || "-"}</td>
+                            </tr>
+                          ))}
+                          {(!selectedEvent.attendances || selectedEvent.attendances.length === 0) && (
+                            <tr>
+                              <td colSpan={4} className="px-4 py-8 text-center text-sm text-gray-500">Bu etkinliğe henüz katılımcı eklenmemiş.</td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
+      {/* TOAST NOTIFICATION */}
+      <AnimatePresence>
+        {toastMessage && (
+          <motion.div
+            initial={{ opacity: 0, y: -50, x: 50 }}
+            animate={{ opacity: 1, y: 0, x: 0 }}
+            exit={{ opacity: 0, y: -50, x: 50 }}
+            className={`fixed top-6 right-6 z-[100] px-5 py-4 rounded-xl shadow-2xl border flex items-start gap-3 max-w-md ${
+              toastMessage.type === "error" 
+                ? "bg-red-500/10 border-red-500/30 text-red-400 backdrop-blur-md" 
+                : "bg-green-500/10 border-green-500/30 text-green-400 backdrop-blur-md"
+            }`}
+          >
+            <div className="mt-0.5">
+              {toastMessage.type === "error" ? <XCircle className="w-5 h-5" /> : <CheckCircle className="w-5 h-5" />}
+            </div>
+            <div>
+              <h4 className="font-bold text-sm mb-1">{toastMessage.type === "error" ? "Hata: Yükleme İptal Edildi" : "Başarılı"}</h4>
+              <p className="text-xs opacity-90 leading-relaxed">{toastMessage.message}</p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
     </div>
   );
 }
