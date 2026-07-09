@@ -26,12 +26,25 @@ import {
   Plus,
   RefreshCw,
   Sparkles,
-  Info
+  Info,
+  Trash2,
+  Sliders,
+  LayoutDashboard
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
 import { read, utils } from "xlsx";
+import { db } from "./firebase";
+import { collection, getDocs, getDoc, doc, setDoc, writeBatch, arrayUnion, deleteDoc } from "firebase/firestore";
 
-type TabType = "participants" | "events" | "exams" | "upload";
+type TabType = "dashboard" | "participants" | "events" | "exams" | "upload" | "settings";
+
+interface DropdownSettings {
+  eventTypes: string[];
+  trainers: string[];
+  purposes: string[];
+  contents: string[];
+}
 
 interface UserData {
   id: string;
@@ -87,12 +100,13 @@ interface EventData {
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<TabType>("participants");
+  const [activeTab, setActiveTab] = useState<TabType>("dashboard");
   const [users, setUsers] = useState<UserData[]>([]);
   const [events, setEvents] = useState<EventData[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchTerm, setSearchTerm] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
 
   // Detail panel state
   const [selectedUser, setSelectedUser] = useState<UserData | null>(null);
@@ -114,21 +128,51 @@ export default function App() {
   const [uploadStatusMsg, setUploadStatusMsg] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Fetch real data from the Express backend
+  // Event Form Modal State
+  const [isEventModalOpen, setIsEventModalOpen] = useState(false);
+  const [eventFormData, setEventFormData] = useState({
+    eventType: "",
+    date: "",
+    trainer: "",
+    purpose: "",
+    content: "",
+    description: ""
+  });
+
+  // Settings State
+  const [dropdownSettings, setDropdownSettings] = useState<DropdownSettings>({
+    eventTypes: ["Seminer", "Webinar", "Workshop"],
+    trainers: ["Eğitmen 1", "Eğitmen 2"],
+    purposes: ["Sertifikasyon", "Bilgilendirme"],
+    contents: ["Network Temelleri", "İleri Düzey Yönlendirme"]
+  });
+  const [settingsInputs, setSettingsInputs] = useState({
+    eventTypes: "", trainers: "", purposes: "", contents: ""
+  });
+
+  // Fetch data from Firebase Firestore
   const fetchData = async () => {
     try {
       setLoading(true);
-      const [usersRes, eventsRes] = await Promise.all([
-        fetch("/api/users"),
-        fetch("/api/events")
+      const usersCol = collection(db, "users");
+      const eventsCol = collection(db, "events");
+      const settingsDoc = doc(db, "settings", "dropdowns");
+      
+      const [usersSnapshot, eventsSnapshot, settingsSnapshot] = await Promise.all([
+        getDocs(usersCol),
+        getDocs(eventsCol),
+        getDoc(settingsDoc)
       ]);
       
-      if (usersRes.ok && eventsRes.ok) {
-        const usersData = await usersRes.json();
-        const eventsData = await eventsRes.json();
-        setUsers(usersData);
-        setEvents(eventsData);
+      const usersData = usersSnapshot.docs.map(d => ({ id: d.id, ...d.data() })) as UserData[];
+      const eventsData = eventsSnapshot.docs.map(d => ({ id: d.id, ...d.data() })) as EventData[];
+      
+      if (settingsSnapshot.exists()) {
+        setDropdownSettings(settingsSnapshot.data() as DropdownSettings);
       }
+      
+      setUsers(usersData);
+      setEvents(eventsData);
     } catch (error) {
       console.error("Error fetching dashboard data:", error);
     } finally {
@@ -140,10 +184,82 @@ export default function App() {
     fetchData();
   }, [activeTab]);
 
+  const handleUpdateDropdowns = async (newSettings: DropdownSettings) => {
+    setDropdownSettings(newSettings);
+    try {
+      await setDoc(doc(db, "settings", "dropdowns"), newSettings, { merge: true });
+    } catch (error) {
+      console.error("Error saving settings:", error);
+    }
+  };
+
+  const handleAddDropdownItem = (category: keyof DropdownSettings) => {
+    const value = settingsInputs[category].trim();
+    if (!value) return;
+    const newSettings = { ...dropdownSettings, [category]: [...dropdownSettings[category], value] };
+    handleUpdateDropdowns(newSettings);
+    setSettingsInputs({ ...settingsInputs, [category]: "" });
+  };
+
+  const handleRemoveDropdownItem = (category: keyof DropdownSettings, index: number) => {
+    const newSettings = { 
+      ...dropdownSettings, 
+      [category]: dropdownSettings[category].filter((_, i) => i !== index) 
+    };
+    handleUpdateDropdowns(newSettings);
+  };
+
   const handleRefresh = async () => {
     setIsRefreshing(true);
     await fetchData();
     setIsRefreshing(false);
+  };
+
+  // Deletion functions
+  const handleDeleteUser = async (userId: string) => {
+    if (!window.confirm("Bu katılımcıyı silmek istediğinize emin misiniz? Bu işlem geri alınamaz.")) return;
+    try {
+      await deleteDoc(doc(db, "users", userId));
+      setUsers(users.filter(u => u.id !== userId));
+      if (selectedUser?.id === userId) setSelectedUser(null);
+      setSelectedUserIds(selectedUserIds.filter(id => id !== userId));
+    } catch (error) {
+      console.error("Kullanıcı silinirken hata:", error);
+      alert("Silme işlemi başarısız oldu.");
+    }
+  };
+
+  const handleBulkDeleteUsers = async () => {
+    if (selectedUserIds.length === 0) return;
+    if (!window.confirm(`Seçilen ${selectedUserIds.length} katılımcıyı silmek istediğinize emin misiniz? Bu işlem geri alınamaz.`)) return;
+    try {
+      setLoading(true);
+      const batch = writeBatch(db);
+      selectedUserIds.forEach(id => {
+        batch.delete(doc(db, "users", id));
+      });
+      await batch.commit();
+      setUsers(users.filter(u => !selectedUserIds.includes(u.id)));
+      setSelectedUserIds([]);
+      if (selectedUser && selectedUserIds.includes(selectedUser.id)) setSelectedUser(null);
+    } catch (error) {
+      console.error("Toplu silme hatası:", error);
+      alert("Toplu silme işlemi başarısız oldu.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteEvent = async (eventId: string) => {
+    if (!window.confirm("Bu etkinliği silmek istediğinize emin misiniz?")) return;
+    try {
+      await deleteDoc(doc(db, "events", eventId));
+      setEvents(events.filter(e => e.id !== eventId));
+      if (selectedEvent?.id === eventId) setSelectedEvent(null);
+    } catch (error) {
+      console.error("Etkinlik silinirken hata:", error);
+      alert("Silme işlemi başarısız oldu.");
+    }
   };
 
   // Search filtering
@@ -199,46 +315,117 @@ export default function App() {
         
         const firstSheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[firstSheetName];
-        const json: any[] = utils.sheet_to_json(worksheet);
+        
+        const rowsAsArrays = utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
+        let headerRowIndex = -1;
+        
+        for (let i = 0; i < Math.min(10, rowsAsArrays.length); i++) {
+          const row = rowsAsArrays[i];
+          if (!row) continue;
+          
+          const stringContent = row.filter(Boolean).map(String).join(" ");
+          const lowerStr = stringContent.toLowerCase();
+          if (lowerStr.includes("ad") && lowerStr.includes("soyad") && lowerStr.includes("posta")) {
+            headerRowIndex = i;
+            break;
+          }
+        }
+        
+        if (headerRowIndex === -1) {
+          throw new Error("Geçerli bir başlık satırı (Ad, Soyad, E-Posta vb.) bulunamadı.");
+        }
+        
+        const headers = rowsAsArrays[headerRowIndex] || [];
+        const json = [];
+        
+        for (let i = headerRowIndex + 1; i < rowsAsArrays.length; i++) {
+          const rowData = rowsAsArrays[i];
+          if (!rowData || rowData.length === 0) continue;
+          
+          let rowObj: any = {};
+          headers.forEach((h: string, index: number) => {
+            if (h) rowObj[h] = rowData[index];
+          });
+          
+          if (Object.keys(rowObj).length > 0) {
+            json.push(rowObj);
+          }
+        }
         
         setUploadProgress(90);
         setParsedRows(json);
         setUploadProgress(100);
-        setUploadStatusMsg(`${file.name} başarıyla çözümlendi! Aşağıdaki tablodan veriyi inceleyip kaydedebilirsiniz.`);
+        setUploadStatusMsg(`${file.name} başarıyla çözümlendi!`);
         
         setTimeout(() => {
           setUploadProgress(null);
         }, 1500);
-      } catch (err) {
+      } catch (err: any) {
         console.error("Error reading file:", err);
         setUploadProgress(null);
-        setUploadStatusMsg("Hata: Excel dosyası okunamadı. Lütfen geçerli bir dosya yükleyin.");
+        setUploadStatusMsg(`Hata: ${err.message || "Excel dosyası okunamadı. Lütfen geçerli bir dosya yükleyin."}`);
       }
     };
     
     reader.readAsBinaryString(file);
   };
 
-  // Save imported rows to database
+  // Save imported rows to database (Firebase)
   const saveImportedData = async () => {
     if (parsedRows.length === 0) return;
     try {
       setLoading(true);
-      const response = await fetch("/api/upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows: parsedRows })
-      });
+      const batch = writeBatch(db);
       
-      if (response.ok) {
-        const result = await response.json();
-        setUploadStatusMsg(`Başarılı! ${result.count} satır veri veri tabanına işlendi.`);
-        setParsedRows([]);
-        fetchData();
-        setActiveTab("participants");
-      } else {
-        setUploadStatusMsg("Hata: Sunucuya veri kaydı başarısız oldu.");
+      const generatedEventName = eventFormData.content || eventFormData.eventType || "Genel Eğitim";
+      const eventId = generatedEventName.replace(/[^a-zA-Z0-9]/g, "") + "-" + Date.now();
+      
+      let processed = 0;
+      for (const row of parsedRows) {
+        const firstName = row["Ad"] || row["firstName"] || "";
+        const lastName = row["Soyad"] || row["lastName"] || "";
+        const email = row["E-Posta"] || row["E-posta"] || row["Email"] || row["email"] || "";
+        const company = row["Firma"] || row["Kurum"] || row["Company"] || row["company"] || "";
+        const phone = row["Telefon"] || row["Phone"] || row["phone"] || "";
+        
+        if (!firstName || !lastName) continue;
+        
+        const userId = email ? email.replace(/[^a-zA-Z0-9]/g, "") : `${firstName}${lastName}`.replace(/[^a-zA-Z0-9]/g, "");
+        
+        const userRef = doc(db, "users", userId);
+        batch.set(userRef, {
+          firstName, lastName, email, company, phone,
+          attendances: arrayUnion({
+            id: `${userId}-${eventId}`,
+            event: { id: eventId, name: generatedEventName, date: eventFormData.date || new Date().toISOString() }
+          })
+        }, { merge: true });
+
+        const eventRef = doc(db, "events", eventId);
+        batch.set(eventRef, {
+          name: generatedEventName,
+          date: eventFormData.date || new Date().toISOString(),
+          eventType: eventFormData.eventType,
+          trainer: eventFormData.trainer,
+          purpose: eventFormData.purpose,
+          content: eventFormData.content,
+          description: eventFormData.description,
+          attendances: arrayUnion({
+            id: `${userId}-${eventId}`,
+            user: { id: userId, firstName, lastName, company }
+          })
+        }, { merge: true });
+        
+        processed++;
       }
+      
+      await batch.commit();
+      
+      setUploadStatusMsg(`Başarılı! ${processed} katılımcı "${generatedEventName}" etkinliğine eklendi.`);
+      setParsedRows([]);
+      setIsEventModalOpen(false);
+      fetchData();
+      setActiveTab("participants");
     } catch (error) {
       console.error("Save import error:", error);
       setUploadStatusMsg("Hata: Veritabanına bağlanılamadı.");
@@ -251,29 +438,22 @@ export default function App() {
   const saveScoreChange = async (examId: string) => {
     if (!selectedUser) return;
     try {
-      const response = await fetch("/api/update-result", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId: selectedUser.id,
-          examId,
-          score: editScoreValue
-        })
-      });
-
-      if (response.ok) {
-        // Refresh local users list
-        const updatedUser = await response.json();
-        // Update user selection with updated score
-        const updatedUsersListRes = await fetch("/api/users");
-        if (updatedUsersListRes.ok) {
-          const freshUsers = await updatedUsersListRes.json();
-          setUsers(freshUsers);
-          const found = freshUsers.find((u: any) => u.id === selectedUser.id);
-          if (found) setSelectedUser(found);
+      const userRef = doc(db, "users", selectedUser.id);
+      
+      const updatedResults = selectedUser.examResults.map(r => {
+        if (r.exam.id === examId) {
+          const status = editScoreValue >= r.exam.passingScore ? "Geçti" : "Kaldı";
+          return { ...r, score: editScoreValue, status };
         }
-        setEditingScoreId(null);
-      }
+        return r;
+      });
+      
+      await setDoc(userRef, { examResults: updatedResults }, { merge: true });
+      
+      await fetchData();
+      setEditingScoreId(null);
+      setSelectedUser(prev => prev ? { ...prev, examResults: updatedResults } : null);
+      
     } catch (error) {
       console.error("Failed to update score:", error);
     }
@@ -283,29 +463,30 @@ export default function App() {
   const handleAssignExam = async (eventId: string) => {
     if (!selectedUser || !newExamName) return;
     try {
-      const response = await fetch("/api/assign-exam", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId: selectedUser.id,
-          eventId,
-          examName: newExamName,
-          passingScore: newExamPassingScore
-        })
-      });
-
-      if (response.ok) {
-        // Refresh
-        const updatedUsersListRes = await fetch("/api/users");
-        if (updatedUsersListRes.ok) {
-          const freshUsers = await updatedUsersListRes.json();
-          setUsers(freshUsers);
-          const found = freshUsers.find((u: any) => u.id === selectedUser.id);
-          if (found) setSelectedUser(found);
+      const userRef = doc(db, "users", selectedUser.id);
+      const examId = newExamName.replace(/[^a-zA-Z0-9]/g, "");
+      
+      const newExamResult = {
+        id: `${selectedUser.id}-${examId}`,
+        score: 0,
+        status: "Kaldı",
+        exam: {
+          id: examId,
+          name: newExamName,
+          passingScore: newExamPassingScore,
+          event: { id: eventId, name: "Event" }
         }
-        setShowAssignForm(false);
-        setNewExamName("");
-      }
+      };
+      
+      const updatedResults = [...(selectedUser.examResults || []), newExamResult];
+      await setDoc(userRef, { examResults: updatedResults }, { merge: true });
+      
+      await fetchData();
+      
+      setShowAssignForm(false);
+      setNewExamName("");
+      setSelectedUser(prev => prev ? { ...prev, examResults: updatedResults } : null);
+      
     } catch (error) {
       console.error("Error assigning exam:", error);
     }
@@ -333,6 +514,18 @@ export default function App() {
           <div className="text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-2 px-3">
             Eğitim Yönetimi
           </div>
+
+          <button
+            onClick={() => { setActiveTab("dashboard"); setSelectedEvent(null); setSelectedUser(null); }}
+            className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 group ${
+              activeTab === "dashboard" 
+                ? "active-nav font-semibold" 
+                : "text-[#b5bac1] discord-hover"
+            }`}
+          >
+            <LayoutDashboard className="w-4 h-4 text-[#80848e] group-hover:text-white transition-colors" />
+            <span>Ana Sayfa</span>
+          </button>
 
           <button
             onClick={() => { setActiveTab("participants"); setSelectedEvent(null); }}
@@ -388,6 +581,17 @@ export default function App() {
                 <span className="text-[9px] bg-[#5865f2] px-1.5 py-0.5 rounded text-white font-bold">XLSX</span>
               </span>
             </button>
+            <button
+              onClick={() => setActiveTab("settings")}
+              className={`w-full flex items-center gap-3 px-3 py-2 mt-1 rounded-lg text-sm font-medium transition-all duration-200 group ${
+                activeTab === "settings" 
+                  ? "active-nav font-semibold" 
+                  : "text-[#b5bac1] discord-hover"
+              }`}
+            >
+              <Sliders className="w-4 h-4 text-[#80848e] group-hover:text-white transition-colors" />
+              <span>Seçenek Yönetimi</span>
+            </button>
           </div>
         </nav>
 
@@ -416,17 +620,21 @@ export default function App() {
         <header className="h-16 flex items-center justify-between px-8 bg-[#1e1f22] border-b border-[#2b2d31] flex-shrink-0 z-10 shadow-sm">
           <div className="flex items-center gap-4 text-white font-semibold text-lg">
             <span>
+              {activeTab === "dashboard" && "Ana Sayfa / İstatistikler"}
               {activeTab === "participants" && "Katılımcı Yönetimi"}
               {activeTab === "events" && "Etkinlik Planlama"}
               {activeTab === "exams" && "Sertifika & Sınavlar"}
               {activeTab === "upload" && "Akıllı Excel Sihirbazı"}
+              {activeTab === "settings" && "Seçenek Yönetimi"}
             </span>
             <span className="text-gray-600">/</span>
             <span className="text-[#b5bac1] font-normal text-sm flex items-center gap-1.5">
+              {activeTab === "dashboard" && "Genel Bakış"}
               {activeTab === "participants" && `${users.length} Toplam Kayıt`}
               {activeTab === "events" && `${events.length} Aktif Eğitim`}
               {activeTab === "exams" && "Puan Baremleri"}
               {activeTab === "upload" && "Sürükle-bırak excel aktarımı"}
+              {activeTab === "settings" && "Dinamik Form Seçenekleri"}
               
               <button 
                 onClick={handleRefresh}
@@ -473,50 +681,172 @@ export default function App() {
               className="space-y-6"
             >
               
-              {/* TOP FLIGHT STATISTICS CARDS (Bento Grid styling with custom anti-gravity shadows) */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                
-                <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden group">
-                  <div className="absolute top-0 right-0 w-24 h-24 bg-[#5865f2]/5 rounded-full blur-xl group-hover:bg-[#5865f2]/10 transition-colors duration-300"></div>
-                  <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Aktif Katılımcılar</span>
-                  <div className="flex items-baseline gap-2">
+              {/* TAB-SPECIFIC STATISTICS CARDS */}
+              {activeTab === "participants" && (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden">
+                    <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Toplam Katılım</span>
+                    <span className="text-3xl font-bold text-white">{users.reduce((acc, u) => acc + (u.attendances?.length || 0), 0)}</span>
+                    <span className="text-xs text-[#b5bac1] mt-1">Eğitimlere yapılan toplam kayıt</span>
+                  </div>
+                  <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden">
+                    <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Uniq Katılımcı</span>
                     <span className="text-3xl font-bold text-white">{users.length}</span>
-                    <span className="text-[10px] text-green-400 font-semibold bg-green-500/10 px-1.5 py-0.5 rounded">+%12 geçen aydan beri</span>
+                    <span className="text-xs text-[#b5bac1] mt-1">Sisteme kayıtlı tekil kullanıcı</span>
                   </div>
-                  <span className="text-xs text-[#b5bac1] mt-1">Sertifika almaya hak kazanmış veya eğitimde olanlar</span>
-                </div>
-
-                <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden group">
-                  <div className="absolute top-0 right-0 w-24 h-24 bg-[#5865f2]/5 rounded-full blur-xl group-hover:bg-[#5865f2]/10 transition-colors duration-300"></div>
-                  <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Tamamlanan Sınavlar</span>
-                  <div className="flex items-baseline gap-2">
+                  <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden">
+                    <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Katılım / Tekil Oranı</span>
                     <span className="text-3xl font-bold text-white">
-                      {users.reduce((acc, u) => acc + (u.examResults?.length || 0), 0)}
+                      {users.length > 0 ? (users.reduce((acc, u) => acc + (u.attendances?.length || 0), 0) / users.length).toFixed(1) : "0"}
                     </span>
-                    <span className="text-[10px] text-[#5865f2] font-semibold bg-[#5865f2]/10 px-1.5 py-0.5 rounded">Toplam Sertifika</span>
-                  </div>
-                  <span className="text-xs text-[#b5bac1] mt-1">Akademi sınavlarında başarı sağlayanlar</span>
-                </div>
-
-                <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden">
-                  <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Başarı Oranı</span>
-                  <span className="text-3xl font-bold text-white">
-                    {users.length > 0 ? (
-                      (users.reduce((acc, u) => {
-                        const passed = u.examResults.filter(r => r.status === "Geçti").length;
-                        const total = u.examResults.length;
-                        return acc + (total > 0 ? (passed / total) : 0);
-                      }, 0) / users.length * 100).toFixed(1)
-                    ) : "88.4"}%
-                  </span>
-                  <div className="w-full bg-[#1e1f22] h-2 mt-2 rounded-full overflow-hidden">
-                    <div className="bg-[#5865f2] h-full rounded-full transition-all duration-1000" style={{ width: "88%" }}></div>
+                    <span className="text-xs text-[#b5bac1] mt-1">Kişi başı ortalama eğitim sayısı</span>
                   </div>
                 </div>
+              )}
 
-              </div>
+              {activeTab === "events" && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden">
+                    <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Toplam Etkinlik</span>
+                    <span className="text-3xl font-bold text-white">{events.length}</span>
+                    <span className="text-xs text-[#b5bac1] mt-1">Tüm zamanların kayıtlı etkinlikleri</span>
+                  </div>
+                  <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden">
+                    <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Aktif Etkinlikler</span>
+                    <span className="text-3xl font-bold text-white">
+                      {events.filter(e => new Date(e.date) >= new Date()).length}
+                    </span>
+                    <span className="text-xs text-[#b5bac1] mt-1">Tarihi geçmemiş planlanan etkinlikler</span>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === "exams" && (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden">
+                    <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Toplam Sınav Kaydı</span>
+                    <span className="text-3xl font-bold text-white">{users.reduce((acc, u) => acc + (u.examResults?.length || 0), 0)}</span>
+                  </div>
+                  <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden">
+                    <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Başarılı Olanlar</span>
+                    <span className="text-3xl font-bold text-white">{users.reduce((acc, u) => acc + (u.examResults?.filter(r => r.status === "Geçti").length || 0), 0)}</span>
+                  </div>
+                  <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden">
+                    <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Başarı Oranı</span>
+                    <span className="text-3xl font-bold text-white">
+                      {(() => {
+                        const total = users.reduce((acc, u) => acc + (u.examResults?.length || 0), 0);
+                        const passed = users.reduce((acc, u) => acc + (u.examResults?.filter(r => r.status === "Geçti").length || 0), 0);
+                        return total > 0 ? ((passed / total) * 100).toFixed(1) : "0";
+                      })()}%
+                    </span>
+                  </div>
+                </div>
+              )}
 
               {/* TAB CONTENTS */}
+              {activeTab === "dashboard" && (
+                <div className="space-y-6">
+                  {/* TOP FLIGHT STATISTICS CARDS */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden group">
+                      <div className="absolute top-0 right-0 w-24 h-24 bg-[#5865f2]/5 rounded-full blur-xl group-hover:bg-[#5865f2]/10 transition-colors duration-300"></div>
+                      <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Aktif Katılımcılar</span>
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-3xl font-bold text-white">{users.length}</span>
+                        <span className="text-[10px] text-green-400 font-semibold bg-green-500/10 px-1.5 py-0.5 rounded">+%12 geçen aydan beri</span>
+                      </div>
+                      <span className="text-xs text-[#b5bac1] mt-1">Sisteme kayıtlı tekil öğrenci sayısı</span>
+                    </div>
+
+                    <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden group">
+                      <div className="absolute top-0 right-0 w-24 h-24 bg-[#5865f2]/5 rounded-full blur-xl group-hover:bg-[#5865f2]/10 transition-colors duration-300"></div>
+                      <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Tamamlanan Sınavlar</span>
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-3xl font-bold text-white">
+                          {users.reduce((acc, u) => acc + (u.examResults?.length || 0), 0)}
+                        </span>
+                        <span className="text-[10px] text-[#5865f2] font-semibold bg-[#5865f2]/10 px-1.5 py-0.5 rounded">Toplam Sertifika</span>
+                      </div>
+                      <span className="text-xs text-[#b5bac1] mt-1">Akademi sınavlarına giren kişi sayısı</span>
+                    </div>
+
+                    <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden">
+                      <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Genel Başarı Oranı</span>
+                      <span className="text-3xl font-bold text-white">
+                        {(() => {
+                          const total = users.reduce((acc, u) => acc + (u.examResults?.length || 0), 0);
+                          const passed = users.reduce((acc, u) => acc + (u.examResults?.filter(r => r.status === "Geçti").length || 0), 0);
+                          return total > 0 ? ((passed / total) * 100).toFixed(1) : "0";
+                        })()}%
+                      </span>
+                      <div className="w-full bg-[#1e1f22] h-2 mt-2 rounded-full overflow-hidden">
+                        <div className="bg-[#5865f2] h-full rounded-full transition-all duration-1000" style={{ width: (() => {
+                          const total = users.reduce((acc, u) => acc + (u.examResults?.length || 0), 0);
+                          const passed = users.reduce((acc, u) => acc + (u.examResults?.filter(r => r.status === "Geçti").length || 0), 0);
+                          return total > 0 ? ((passed / total) * 100).toFixed(1) : "0";
+                        })() + "%" }}></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* CHARTS ROW */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="bg-[#313338] p-6 rounded-lg border border-[#36373d]/50 shadow-md">
+                      <h3 className="text-white font-bold text-base mb-6 flex items-center gap-2">
+                        <BarChart className="w-5 h-5 text-[#5865f2]" /> Son Etkinlik Katılımları
+                      </h3>
+                      <div className="h-64 w-full text-xs">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart data={events.slice(0, 5).map(e => ({ name: e.name.substring(0, 15) + (e.name.length > 15 ? '...' : ''), katilim: e.attendances?.length || 0 }))}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#36373d" vertical={false} />
+                            <XAxis dataKey="name" stroke="#80848e" tick={{fill: '#80848e'}} tickLine={false} axisLine={false} />
+                            <YAxis stroke="#80848e" tick={{fill: '#80848e'}} tickLine={false} axisLine={false} />
+                            <RechartsTooltip cursor={{fill: '#2b2d31'}} contentStyle={{backgroundColor: '#1e1f22', border: '1px solid #36373d', borderRadius: '8px', color: '#fff'}} />
+                            <Bar dataKey="katilim" fill="#5865f2" radius={[4, 4, 0, 0]} />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </div>
+
+                    <div className="bg-[#313338] p-6 rounded-lg border border-[#36373d]/50 shadow-md">
+                      <h3 className="text-white font-bold text-base mb-6 flex items-center gap-2">
+                        <PieChart className="w-5 h-5 text-[#5865f2]" /> Sınav Başarı Dağılımı
+                      </h3>
+                      <div className="h-64 w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <PieChart>
+                            <Pie
+                              data={[
+                                { name: 'Başarılı', value: users.reduce((acc, u) => acc + (u.examResults?.filter(r => r.status === "Geçti").length || 0), 0) },
+                                { name: 'Başarısız', value: users.reduce((acc, u) => acc + (u.examResults?.filter(r => r.status === "Kaldı").length || 0), 0) }
+                              ]}
+                              cx="50%"
+                              cy="50%"
+                              innerRadius={60}
+                              outerRadius={80}
+                              paddingAngle={5}
+                              dataKey="value"
+                            >
+                              <Cell key="cell-0" fill="#5865f2" />
+                              <Cell key="cell-1" fill="#ed4245" />
+                            </Pie>
+                            <RechartsTooltip contentStyle={{backgroundColor: '#1e1f22', border: '1px solid #36373d', borderRadius: '8px', color: '#fff'}} />
+                          </PieChart>
+                        </ResponsiveContainer>
+                        <div className="flex justify-center gap-6 mt-2">
+                          <div className="flex items-center gap-2 text-xs text-[#b5bac1]">
+                            <div className="w-3 h-3 rounded-full bg-[#5865f2]"></div> Başarılı
+                          </div>
+                          <div className="flex items-center gap-2 text-xs text-[#b5bac1]">
+                            <div className="w-3 h-3 rounded-full bg-[#ed4245]"></div> Başarısız
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
               {activeTab === "participants" && (
                 <div className="bg-[#313338] rounded-lg flex flex-col anti-gravity overflow-hidden border border-[#36373d]/40">
                   <div className="p-5 border-b border-[#1e1f22] bg-[#2b2d31]/30 flex justify-between items-center">
@@ -524,7 +854,15 @@ export default function App() {
                       <h3 className="text-white font-bold text-base">Güncel Katılımcı Listesi</h3>
                       <p className="text-xs text-gray-500">Katılımcıların detaylarını, katıldıkları eğitimleri ve sınav notlarını görmek için satıra tıklayın.</p>
                     </div>
-                    <div className="flex gap-2">
+                    <div className="flex gap-2 items-center">
+                      {selectedUserIds.length > 0 && (
+                        <button 
+                          onClick={handleBulkDeleteUsers}
+                          className="bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white px-3 py-1.5 rounded border border-red-500/20 font-bold text-xs transition-all flex items-center gap-1.5"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" /> Seçili {selectedUserIds.length} Kişiyi Sil
+                        </button>
+                      )}
                       <span className="bg-[#2b2d31] text-[10px] px-3 py-1 rounded border border-[#1e1f22] text-[#b5bac1] font-semibold">
                         Görünüm: Akışkan Tablo
                       </span>
@@ -559,6 +897,17 @@ export default function App() {
                       <table className="w-full text-left border-collapse">
                         <thead className="bg-[#1e1f22] text-[11px] uppercase font-bold text-gray-500">
                           <tr>
+                            <th className="px-6 py-4 w-10">
+                              <input 
+                                type="checkbox" 
+                                className="rounded border-[#36373d] bg-[#1e1f22] text-[#5865f2] focus:ring-0 focus:ring-offset-0 cursor-pointer"
+                                checked={filteredUsers.length > 0 && selectedUserIds.length === filteredUsers.length}
+                                onChange={(e) => {
+                                  if (e.target.checked) setSelectedUserIds(filteredUsers.map(u => u.id));
+                                  else setSelectedUserIds([]);
+                                }}
+                              />
+                            </th>
                             <th className="px-6 py-4">Katılımcı</th>
                             <th className="px-6 py-4">Kurum / Şube</th>
                             <th className="px-6 py-4">Son Eğitim</th>
@@ -599,6 +948,17 @@ export default function App() {
                                 onClick={() => setSelectedUser(user)}
                                 className="discord-hover transition-colors cursor-pointer group"
                               >
+                                <td className="px-6 py-4" onClick={(e) => e.stopPropagation()}>
+                                  <input 
+                                    type="checkbox" 
+                                    className="rounded border-[#36373d] bg-[#1e1f22] text-[#5865f2] focus:ring-0 focus:ring-offset-0 cursor-pointer"
+                                    checked={selectedUserIds.includes(user.id)}
+                                    onChange={(e) => {
+                                      if (e.target.checked) setSelectedUserIds([...selectedUserIds, user.id]);
+                                      else setSelectedUserIds(selectedUserIds.filter(id => id !== user.id));
+                                    }}
+                                  />
+                                </td>
                                 <td className="px-6 py-4 flex items-center gap-3">
                                   <div className="w-8 h-8 rounded-full bg-[#5865f2] flex items-center justify-center text-white text-[11px] font-bold shadow-sm shadow-[#5865f2]/20">
                                     {initials}
@@ -612,9 +972,18 @@ export default function App() {
                                 <td className="px-6 py-4 font-mono text-[12px] text-[#b5bac1]">{lastAttendance}</td>
                                 <td className="px-6 py-4">{statusBadge}</td>
                                 <td className="px-6 py-4 text-right">
-                                  <button className="text-gray-500 hover:text-white font-semibold text-xs group-hover:text-white group-hover:translate-x-[-2px] transition-all flex items-center gap-1 ml-auto">
-                                    Detay <ChevronRight className="w-3.5 h-3.5" />
-                                  </button>
+                                  <div className="flex items-center justify-end gap-3">
+                                    <button 
+                                      onClick={(e) => { e.stopPropagation(); handleDeleteUser(user.id); }}
+                                      className="text-gray-500 hover:text-red-400 font-semibold text-xs transition-colors flex items-center p-1 rounded hover:bg-red-500/10"
+                                      title="Kullanıcıyı Sil"
+                                    >
+                                      <Trash2 className="w-4 h-4" />
+                                    </button>
+                                    <button className="text-gray-500 hover:text-white font-semibold text-xs group-hover:text-white group-hover:translate-x-[-2px] transition-all flex items-center gap-1">
+                                      Detay <ChevronRight className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
                                 </td>
                               </tr>
                             );
@@ -648,10 +1017,19 @@ export default function App() {
                             className="bg-[#2b2d31] border border-[#36373d] rounded-lg p-5 hover:border-[#5865f2]/40 hover:-translate-y-1 transition-all duration-300 relative group"
                           >
                             <div className="flex justify-between items-start mb-3">
-                              <h4 className="text-white font-bold text-base group-hover:text-[#5865f2] transition-colors">{event.name}</h4>
-                              <span className="text-[10px] bg-[#5865f2]/10 text-[#5865f2] font-bold px-2 py-0.5 rounded border border-[#5865f2]/20">
-                                ETKİNLİK
-                              </span>
+                              <h4 className="text-white font-bold text-base group-hover:text-[#5865f2] transition-colors pr-2">{event.name}</h4>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <button 
+                                  onClick={(e) => { e.stopPropagation(); handleDeleteEvent(event.id); }}
+                                  className="text-gray-500 hover:text-red-400 p-1 rounded hover:bg-red-500/10 transition-colors"
+                                  title="Etkinliği Sil"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                                <span className="text-[10px] bg-[#5865f2]/10 text-[#5865f2] font-bold px-2 py-0.5 rounded border border-[#5865f2]/20">
+                                  ETKİNLİK
+                                </span>
+                              </div>
                             </div>
 
                             <div className="space-y-2 mb-4 text-xs text-gray-400">
@@ -746,9 +1124,9 @@ export default function App() {
                         <UploadCloud className="w-8 h-8" />
                       </div>
                       <div className="space-y-1">
-                        <h4 className="text-white font-bold text-base">Eğitim Sonuç Excelini Sürükleyip Bırakın</h4>
+                        <h4 className="text-white font-bold text-base">Eğitim Katılımcı Excelini Sürükleyip Bırakın</h4>
                         <p className="text-xs text-gray-500 max-w-md">
-                          Dosyada <strong className="text-white">Ad, Soyad, Kurum, E-posta, Eğitim Adı, Sınav Adı, Sınav Puanı</strong> ve opsiyonel <strong className="text-white">Geçme Notu</strong> sütunları bulunmalıdır.
+                          Dosyada <strong className="text-white">Ad, Soyad, E-Posta, Telefon, Firma</strong> sütunları bulunmalıdır. Etkinlik adı ilk satırdan otomatik algılanır.
                         </p>
                       </div>
                       <button 
@@ -800,7 +1178,7 @@ export default function App() {
                             İptal Et
                           </button>
                           <button 
-                            onClick={saveImportedData}
+                            onClick={() => setIsEventModalOpen(true)}
                             className="bg-[#5865f2] hover:bg-[#5865f2]/90 text-white px-5 py-2 rounded-md text-xs font-bold transition-all"
                           >
                             Veritabanına Yazdır
@@ -814,10 +1192,8 @@ export default function App() {
                             <tr>
                               <th className="px-4 py-2.5">Ad Soyad</th>
                               <th className="px-4 py-2.5">E-posta</th>
-                              <th className="px-4 py-2.5">Kurum</th>
-                              <th className="px-4 py-2.5">Eğitim Adı</th>
-                              <th className="px-4 py-2.5">Sınav Adı</th>
-                              <th className="px-4 py-2.5 text-right">Puan</th>
+                              <th className="px-4 py-2.5">Telefon</th>
+                              <th className="px-4 py-2.5">Firma</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-[#1e1f22]">
@@ -826,11 +1202,9 @@ export default function App() {
                                 <td className="px-4 py-2 text-white font-medium">
                                   {row["Ad"] || row["firstName"] || ""} {row["Soyad"] || row["lastName"] || ""}
                                 </td>
-                                <td className="px-4 py-2 font-mono">{row["E-posta"] || row["Email"] || row["email"] || "-"}</td>
-                                <td className="px-4 py-2">{row["Kurum"] || row["Company"] || row["company"] || "-"}</td>
-                                <td className="px-4 py-2">{row["Eğitim Adı"] || row["Egitim Adi"] || row["eventName"] || "-"}</td>
-                                <td className="px-4 py-2 text-[#5865f2] font-medium">{row["Sınav Adı"] || row["Sinav Adi"] || row["examName"] || "-"}</td>
-                                <td className="px-4 py-2 text-right font-bold text-white">{row["Sınav Puanı"] || row["score"] || "0"}</td>
+                                <td className="px-4 py-2 font-mono">{row["E-Posta"] || row["E-posta"] || row["Email"] || row["email"] || "-"}</td>
+                                <td className="px-4 py-2 font-mono">{row["Telefon"] || row["Phone"] || row["phone"] || "-"}</td>
+                                <td className="px-4 py-2">{row["Firma"] || row["Kurum"] || row["Company"] || row["company"] || "-"}</td>
                               </tr>
                             ))}
                           </tbody>
@@ -839,8 +1213,150 @@ export default function App() {
                     </motion.div>
                   )}
 
+
                 </div>
               )}
+
+                  {/* Yeni Sekme: Seçenek Yönetimi */}
+                  {activeTab === "settings" && (
+                    <div className="space-y-6">
+                      <div className="bg-[#313338] p-6 rounded-lg border border-[#36373d]/50 shadow-md">
+                        <div className="flex items-center gap-3 mb-6">
+                          <Sliders className="w-5 h-5 text-[#5865f2]" />
+                          <h3 className="text-white font-bold text-lg">Seçenek Yönetimi</h3>
+                        </div>
+                        <p className="text-xs text-[#b5bac1] mb-6">
+                          Buradan yeni etkinlik tanımlama ekranındaki açılır liste (dropdown) seçeneklerini dinamik olarak düzenleyebilirsiniz.
+                        </p>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                          {/* Etkinlik Türü */}
+                          <div className="bg-[#2b2d31] p-5 rounded-lg border border-[#1e1f22]">
+                            <h4 className="text-sm font-bold text-gray-300 mb-4">Etkinlik Türü</h4>
+                            <div className="flex gap-2 mb-4">
+                              <input 
+                                type="text"
+                                value={settingsInputs.eventTypes}
+                                onChange={e => setSettingsInputs({...settingsInputs, eventTypes: e.target.value})}
+                                placeholder="Örn: Saha Eğitimi"
+                                className="flex-1 bg-[#1e1f22] border border-[#36373d] rounded-md px-3 py-2 text-xs text-white focus:outline-none focus:border-[#5865f2]"
+                                onKeyDown={e => { if (e.key === 'Enter') handleAddDropdownItem("eventTypes"); }}
+                              />
+                              <button 
+                                onClick={() => handleAddDropdownItem("eventTypes")}
+                                className="bg-[#5865f2] hover:bg-[#5865f2]/90 text-white px-3 py-2 rounded-md text-xs font-bold transition-all flex items-center justify-center"
+                              >
+                                Ekle
+                              </button>
+                            </div>
+                            <div className="space-y-2 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
+                              {dropdownSettings.eventTypes.map((item, idx) => (
+                                <div key={idx} className="flex justify-between items-center bg-[#1e1f22] p-2.5 rounded border border-[#36373d]">
+                                  <span className="text-xs text-white">{item}</span>
+                                  <button onClick={() => handleRemoveDropdownItem("eventTypes", idx)} className="text-red-400 hover:text-red-300">
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Eğitmen */}
+                          <div className="bg-[#2b2d31] p-5 rounded-lg border border-[#1e1f22]">
+                            <h4 className="text-sm font-bold text-gray-300 mb-4">Eğitmen</h4>
+                            <div className="flex gap-2 mb-4">
+                              <input 
+                                type="text"
+                                value={settingsInputs.trainers}
+                                onChange={e => setSettingsInputs({...settingsInputs, trainers: e.target.value})}
+                                placeholder="Örn: Ahmet Yılmaz"
+                                className="flex-1 bg-[#1e1f22] border border-[#36373d] rounded-md px-3 py-2 text-xs text-white focus:outline-none focus:border-[#5865f2]"
+                                onKeyDown={e => { if (e.key === 'Enter') handleAddDropdownItem("trainers"); }}
+                              />
+                              <button 
+                                onClick={() => handleAddDropdownItem("trainers")}
+                                className="bg-[#5865f2] hover:bg-[#5865f2]/90 text-white px-3 py-2 rounded-md text-xs font-bold transition-all flex items-center justify-center"
+                              >
+                                Ekle
+                              </button>
+                            </div>
+                            <div className="space-y-2 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
+                              {dropdownSettings.trainers.map((item, idx) => (
+                                <div key={idx} className="flex justify-between items-center bg-[#1e1f22] p-2.5 rounded border border-[#36373d]">
+                                  <span className="text-xs text-white">{item}</span>
+                                  <button onClick={() => handleRemoveDropdownItem("trainers", idx)} className="text-red-400 hover:text-red-300">
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Eğitim Amacı */}
+                          <div className="bg-[#2b2d31] p-5 rounded-lg border border-[#1e1f22]">
+                            <h4 className="text-sm font-bold text-gray-300 mb-4">Eğitim Amacı</h4>
+                            <div className="flex gap-2 mb-4">
+                              <input 
+                                type="text"
+                                value={settingsInputs.purposes}
+                                onChange={e => setSettingsInputs({...settingsInputs, purposes: e.target.value})}
+                                placeholder="Örn: Yeni Ürün Lansmanı"
+                                className="flex-1 bg-[#1e1f22] border border-[#36373d] rounded-md px-3 py-2 text-xs text-white focus:outline-none focus:border-[#5865f2]"
+                                onKeyDown={e => { if (e.key === 'Enter') handleAddDropdownItem("purposes"); }}
+                              />
+                              <button 
+                                onClick={() => handleAddDropdownItem("purposes")}
+                                className="bg-[#5865f2] hover:bg-[#5865f2]/90 text-white px-3 py-2 rounded-md text-xs font-bold transition-all flex items-center justify-center"
+                              >
+                                Ekle
+                              </button>
+                            </div>
+                            <div className="space-y-2 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
+                              {dropdownSettings.purposes.map((item, idx) => (
+                                <div key={idx} className="flex justify-between items-center bg-[#1e1f22] p-2.5 rounded border border-[#36373d]">
+                                  <span className="text-xs text-white">{item}</span>
+                                  <button onClick={() => handleRemoveDropdownItem("purposes", idx)} className="text-red-400 hover:text-red-300">
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Eğitim İçeriği */}
+                          <div className="bg-[#2b2d31] p-5 rounded-lg border border-[#1e1f22]">
+                            <h4 className="text-sm font-bold text-gray-300 mb-4">Eğitim İçeriği</h4>
+                            <div className="flex gap-2 mb-4">
+                              <input 
+                                type="text"
+                                value={settingsInputs.contents}
+                                onChange={e => setSettingsInputs({...settingsInputs, contents: e.target.value})}
+                                placeholder="Örn: Omada Switch Konfigürasyonu"
+                                className="flex-1 bg-[#1e1f22] border border-[#36373d] rounded-md px-3 py-2 text-xs text-white focus:outline-none focus:border-[#5865f2]"
+                                onKeyDown={e => { if (e.key === 'Enter') handleAddDropdownItem("contents"); }}
+                              />
+                              <button 
+                                onClick={() => handleAddDropdownItem("contents")}
+                                className="bg-[#5865f2] hover:bg-[#5865f2]/90 text-white px-3 py-2 rounded-md text-xs font-bold transition-all flex items-center justify-center"
+                              >
+                                Ekle
+                              </button>
+                            </div>
+                            <div className="space-y-2 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
+                              {dropdownSettings.contents.map((item, idx) => (
+                                <div key={idx} className="flex justify-between items-center bg-[#1e1f22] p-2.5 rounded border border-[#36373d]">
+                                  <span className="text-xs text-white">{item}</span>
+                                  <button onClick={() => handleRemoveDropdownItem("contents", idx)} className="text-red-400 hover:text-red-300">
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
             </motion.div>
           </AnimatePresence>
@@ -1053,10 +1569,121 @@ export default function App() {
               </motion.div>
             </>
           )}
-        </AnimatePresence>
-
+          </AnimatePresence>
       </main>
 
+      {/* EVENT MODAL */}
+      <AnimatePresence>
+        {isEventModalOpen && (
+          <>
+            <motion.div 
+              initial={{ opacity: 0 }} animate={{ opacity: 0.5 }} exit={{ opacity: 0 }}
+              onClick={() => setIsEventModalOpen(false)}
+              className="absolute inset-0 bg-black/60 z-[60]"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-3xl bg-[#313338] border border-[#1e1f22] rounded-xl shadow-2xl z-[70] flex flex-col overflow-hidden"
+            >
+              <div className="p-5 border-b border-[#1e1f22] flex justify-between items-center bg-[#2b2d31]/50">
+                <h2 className="text-white font-bold text-lg">Yeni Ekle</h2>
+                <button onClick={() => setIsEventModalOpen(false)} className="text-gray-500 hover:text-white transition-colors">
+                  <XCircle className="w-5 h-5" />
+                </button>
+              </div>
+              
+              <div className="p-6 overflow-y-auto max-h-[70vh] space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-400">Etkinlik Türü <span className="text-red-400">*</span></label>
+                    <div className="flex gap-2">
+                      <select 
+                        value={eventFormData.eventType} onChange={e => setEventFormData({...eventFormData, eventType: e.target.value})}
+                        className="flex-1 bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
+                      >
+                        <option value="">Lütfen Seçiniz</option>
+                        {dropdownSettings.eventTypes.map((t, i) => <option key={i} value={t}>{t}</option>)}
+                      </select>
+                      <button className="bg-[#2b2d31] border border-[#1e1f22] rounded-md p-2 text-gray-400 hover:text-white"><RefreshCw className="w-4 h-4" /></button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-400">Eğitmen <span className="text-red-400">*</span></label>
+                    <div className="flex gap-2">
+                      <select 
+                        value={eventFormData.trainer} onChange={e => setEventFormData({...eventFormData, trainer: e.target.value})}
+                        className="flex-1 bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
+                      >
+                        <option value="">Lütfen Seçiniz</option>
+                        {dropdownSettings.trainers.map((t, i) => <option key={i} value={t}>{t}</option>)}
+                      </select>
+                      <button className="bg-[#2b2d31] border border-[#1e1f22] rounded-md p-2 text-gray-400 hover:text-white"><RefreshCw className="w-4 h-4" /></button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-400">Tarih <span className="text-red-400">*</span></label>
+                    <input 
+                      type="datetime-local" 
+                      value={eventFormData.date} onChange={e => setEventFormData({...eventFormData, date: e.target.value})}
+                      className="w-full bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-400">Eğitim Amacı <span className="text-red-400">*</span></label>
+                    <div className="flex gap-2">
+                      <select 
+                        value={eventFormData.purpose} onChange={e => setEventFormData({...eventFormData, purpose: e.target.value})}
+                        className="flex-1 bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
+                      >
+                        <option value="">Lütfen Seçiniz</option>
+                        {dropdownSettings.purposes.map((p, i) => <option key={i} value={p}>{p}</option>)}
+                      </select>
+                      <button className="bg-[#2b2d31] border border-[#1e1f22] rounded-md p-2 text-gray-400 hover:text-white"><RefreshCw className="w-4 h-4" /></button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-gray-400">Eğitim İçeriği <span className="text-red-400">*</span></label>
+                    <div className="flex gap-2">
+                      <select 
+                        value={eventFormData.content} onChange={e => setEventFormData({...eventFormData, content: e.target.value})}
+                        className="flex-1 bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
+                      >
+                        <option value="">Lütfen Seçiniz</option>
+                        {dropdownSettings.contents.map((c, i) => <option key={i} value={c}>{c}</option>)}
+                      </select>
+                      <button className="bg-[#2b2d31] border border-[#1e1f22] rounded-md p-2 text-gray-400 hover:text-white"><RefreshCw className="w-4 h-4" /></button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5 pt-2">
+                  <label className="text-xs font-bold text-gray-400">Açıklama</label>
+                  <textarea 
+                    value={eventFormData.description} onChange={e => setEventFormData({...eventFormData, description: e.target.value})}
+                    rows={4}
+                    className="w-full bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none resize-none"
+                  />
+                </div>
+              </div>
+
+              <div className="p-5 border-t border-[#1e1f22] bg-[#2b2d31]/50 flex justify-end gap-3">
+                <button onClick={() => setIsEventModalOpen(false)} className="px-5 py-2 rounded-md bg-[#36373d] text-white text-sm font-semibold hover:bg-[#36373d]/80 transition-colors">
+                  İptal
+                </button>
+                <button onClick={saveImportedData} disabled={loading} className="px-5 py-2 rounded-md bg-[#5865f2] text-white text-sm font-semibold hover:bg-[#5865f2]/90 transition-colors flex items-center gap-2">
+                  <Database className="w-4 h-4" /> Oluştur
+                </button>
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
