@@ -11,7 +11,8 @@ import {
   UploadCloud, 
   Mic, 
   Headphones, 
-  Settings, 
+  Settings,
+  LogOut,
   ChevronDown, 
   ChevronUp,
   ArrowUpDown,
@@ -37,8 +38,9 @@ import {
 import { motion, AnimatePresence } from "motion/react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
 import { read, utils, writeFile } from "xlsx";
-import { db } from "./firebase";
+import { db, auth } from "./firebase";
 import { collection, getDocs, getDoc, doc, setDoc, writeBatch, arrayUnion, deleteDoc } from "firebase/firestore";
+import { onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from "firebase/auth";
 
 type TabType = "dashboard" | "invitees" | "participants" | "events" | "exams" | "upload" | "settings";
 
@@ -108,8 +110,114 @@ interface EventData {
   }[];
 }
 
+const AuthScreen = () => {
+  const [isLogin, setIsLogin] = useState(true);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+
+    try {
+      if (isLogin) {
+        await signInWithEmailAndPassword(auth, email, password);
+      } else {
+        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+        await setDoc(doc(db, "admins", userCredential.user.uid), {
+          firstName,
+          lastName,
+          email
+        });
+      }
+    } catch (err: any) {
+      setError(err.message || "Bir hata oluştu.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="flex h-screen w-screen items-center justify-center bg-[#1e1f22] text-[#dbdee1] font-sans">
+      <div className="w-full max-w-md bg-[#313338] p-8 rounded-lg shadow-xl border border-[#36373d]/50">
+        <div className="text-center mb-8">
+          <h2 className="text-2xl font-bold text-white mb-2">{isLogin ? "Tekrar Hoşgeldiniz!" : "Hesap Oluşturun"}</h2>
+          <p className="text-sm text-gray-400">{isLogin ? "Sisteme giriş yapmak için bilgilerinizi girin." : "Yeni bir yönetici hesabı oluşturun."}</p>
+        </div>
+
+        {error && (
+          <div className="bg-red-500/10 border border-red-500/50 text-red-500 px-4 py-2 rounded-md mb-6 text-sm">
+            {error}
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {!isLogin && (
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-gray-400 uppercase">Ad</label>
+                <input required type="text" value={firstName} onChange={e => setFirstName(e.target.value)} className="w-full bg-[#1e1f22] border border-[#1e1f22] rounded px-3 py-2 text-white focus:outline-none focus:border-[#5865f2] transition-colors" />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-gray-400 uppercase">Soyad</label>
+                <input required type="text" value={lastName} onChange={e => setLastName(e.target.value)} className="w-full bg-[#1e1f22] border border-[#1e1f22] rounded px-3 py-2 text-white focus:outline-none focus:border-[#5865f2] transition-colors" />
+              </div>
+            </div>
+          )}
+          
+          <div className="space-y-1">
+            <label className="text-xs font-bold text-gray-400 uppercase">E-Posta</label>
+            <input required type="email" value={email} onChange={e => setEmail(e.target.value)} className="w-full bg-[#1e1f22] border border-[#1e1f22] rounded px-3 py-2 text-white focus:outline-none focus:border-[#5865f2] transition-colors" />
+          </div>
+          
+          <div className="space-y-1">
+            <label className="text-xs font-bold text-gray-400 uppercase">Şifre</label>
+            <input required minLength={6} type="password" value={password} onChange={e => setPassword(e.target.value)} className="w-full bg-[#1e1f22] border border-[#1e1f22] rounded px-3 py-2 text-white focus:outline-none focus:border-[#5865f2] transition-colors" />
+          </div>
+
+          <button disabled={loading} type="submit" className="w-full bg-[#5865f2] hover:bg-[#4752c4] text-white font-bold py-2.5 rounded transition-colors mt-6 disabled:opacity-50">
+            {loading ? "Bekleniyor..." : (isLogin ? "Giriş Yap" : "Kayıt Ol")}
+          </button>
+        </form>
+
+        <div className="mt-6 text-xs text-gray-400">
+          {isLogin ? "Hesabınız yok mu? " : "Zaten hesabınız var mı? "}
+          <button type="button" onClick={() => { setIsLogin(!isLogin); setError(""); }} className="text-[#00a8fc] hover:underline">
+            {isLogin ? "Kayıt Ol" : "Giriş Yap"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export default function App() {
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<TabType>("dashboard");
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        const docRef = doc(db, "admins", user.uid);
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
+          setCurrentUser({ uid: user.uid, email: user.email, ...docSnap.data() });
+        } else {
+          setCurrentUser({ uid: user.uid, email: user.email, firstName: "Yönetici", lastName: "" });
+        }
+      } else {
+        setCurrentUser(null);
+      }
+      setAuthLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
 
   // Invitees tab specific state
   const [inviteeSearchTerm, setInviteeSearchTerm] = useState("");
@@ -1148,6 +1256,18 @@ export default function App() {
 
   // Sınav tanımla sistemi kaldırıldı
 
+  if (authLoading) {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-[#1e1f22] text-[#dbdee1] font-sans">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-[#5865f2]"></div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return <AuthScreen />;
+  }
+
   return (
     <div id="discord-app" className="flex h-screen w-screen overflow-hidden bg-[#1e1f22] text-[#dbdee1] select-none font-sans">
       
@@ -1266,14 +1386,17 @@ export default function App() {
         {/* User Card from Sleek Interface template */}
         <div className="mt-auto p-4 bg-[#313338] mx-3 mb-6 rounded-lg flex items-center gap-3 border border-[#1e1f22] shadow-md hover:border-[#5865f2]/20 transition-all duration-300">
           <div className="w-10 h-10 rounded-full bg-[#5865f2]/20 border border-[#5865f2]/30 flex items-center justify-center text-[#5865f2] font-bold text-sm">
-            SB
+            {currentUser?.firstName?.charAt(0) || "Y"}{currentUser?.lastName?.charAt(0) || ""}
           </div>
           <div className="overflow-hidden flex-1">
-            <p className="text-xs font-bold text-white truncate">Sercan Bozkan</p>
-            <p className="text-[10px] text-[#b5bac1] truncate">System Admin</p>
+            <p className="text-xs font-bold text-white truncate">{currentUser?.firstName} {currentUser?.lastName}</p>
+            <p className="text-[10px] text-[#b5bac1] truncate">{currentUser?.email}</p>
           </div>
           <div className="flex gap-1">
-            <button className="p-1 rounded text-[#b5bac1] hover:text-white hover:bg-[#36373d] transition-all">
+            <button onClick={() => signOut(auth)} title="Çıkış Yap" className="p-1 rounded text-red-400 hover:text-red-300 hover:bg-[#36373d] transition-all">
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
+            <button onClick={() => setActiveTab("settings")} title="Ayarlar" className="p-1 rounded text-[#b5bac1] hover:text-white hover:bg-[#36373d] transition-all">
               <Settings className="w-3.5 h-3.5" />
             </button>
           </div>
@@ -2212,6 +2335,23 @@ export default function App() {
                   {/* Yeni Sekme: Seçenek Yönetimi */}
                   {activeTab === "settings" && (
                     <div className="space-y-6">
+                      {/* Admin Profil Kartı */}
+                      <div className="bg-[#313338] p-6 rounded-lg border border-[#36373d]/50 shadow-md flex items-center gap-6">
+                        <div className="w-20 h-20 rounded-full bg-[#5865f2]/20 border border-[#5865f2]/30 flex items-center justify-center text-[#5865f2] font-bold text-3xl">
+                          {currentUser?.firstName?.charAt(0) || "Y"}{currentUser?.lastName?.charAt(0) || ""}
+                        </div>
+                        <div className="flex-1">
+                          <h3 className="text-white font-bold text-2xl mb-1">{currentUser?.firstName} {currentUser?.lastName}</h3>
+                          <p className="text-[#b5bac1]">{currentUser?.email}</p>
+                          <div className="mt-3 text-xs inline-block bg-[#2b2d31] px-3 py-1 rounded text-green-400 border border-[#1e1f22]">
+                            Yetki: Sistem Yöneticisi
+                          </div>
+                        </div>
+                        <button onClick={() => signOut(auth)} className="bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 px-4 py-2 rounded-md transition-colors flex items-center gap-2 font-bold">
+                          <LogOut className="w-4 h-4" /> Çıkış Yap
+                        </button>
+                      </div>
+
                       <div className="bg-[#313338] p-6 rounded-lg border border-[#36373d]/50 shadow-md">
                         <div className="flex items-center gap-3 mb-6">
                           <Sliders className="w-5 h-5 text-[#5865f2]" />
