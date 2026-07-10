@@ -568,18 +568,16 @@ export default function App() {
     }
   };
 
-  const handleDeleteInvitee = async (userId: string, eventId: string) => {
-    if (!window.confirm("Bu davetli kaydını silmek istediğinize emin misiniz?")) return;
+  const handleDeleteInvitee = async (userId: string) => {
+    if (!window.confirm("Bu kişinin tüm davet kayıtlarını silmek istediğinize emin misiniz?")) return;
     try {
       const user = users.find(u => u.id === userId);
       if (!user) return;
       
-      const newAttendances = (user.attendances || []).filter(a => a.event.id !== eventId);
+      await setDoc(doc(db, "users", userId), { attendances: [] }, { merge: true });
       
-      await setDoc(doc(db, "users", userId), { attendances: newAttendances }, { merge: true });
-      
-      setUsers(users.map(u => u.id === userId ? { ...u, attendances: newAttendances } : u));
-      setSelectedInviteeIds(selectedInviteeIds.filter(id => id !== `${userId}-${eventId}`));
+      setUsers(users.map(u => u.id === userId ? { ...u, attendances: [] } : u));
+      setSelectedInviteeIds(selectedInviteeIds.filter(id => id !== userId));
     } catch (error) {
       console.error("Davetli silinirken hata:", error);
       alert("Silme işlemi başarısız oldu.");
@@ -588,34 +586,20 @@ export default function App() {
 
   const handleBulkDeleteInvitees = async () => {
     if (selectedInviteeIds.length === 0) return;
-    if (!window.confirm(`Seçilen ${selectedInviteeIds.length} davetli kaydını silmek istediğinize emin misiniz?`)) return;
+    if (!window.confirm(`Seçilen ${selectedInviteeIds.length} kişinin tüm davet kayıtlarını silmek istediğinize emin misiniz?`)) return;
     try {
       setLoading(true);
       const batch = writeBatch(db);
-      const userUpdates = new Map<string, any[]>();
       
-      selectedInviteeIds.forEach(idPair => {
-        const userId = idPair.split("-")[0];
-        const actualEventId = idPair.substring(userId.length + 1);
-        
-        if (!userUpdates.has(userId)) {
-          const user = users.find(u => u.id === userId);
-          userUpdates.set(userId, user?.attendances || []);
-        }
-        
-        const currentAttendances = userUpdates.get(userId) || [];
-        userUpdates.set(userId, currentAttendances.filter(a => a.event.id !== actualEventId));
-      });
-      
-      userUpdates.forEach((newAttendances, userId) => {
-        batch.set(doc(db, "users", userId), { attendances: newAttendances }, { merge: true });
+      selectedInviteeIds.forEach(userId => {
+        batch.set(doc(db, "users", userId), { attendances: [] }, { merge: true });
       });
       
       await batch.commit();
       
       setUsers(users.map(u => {
-        if (userUpdates.has(u.id)) {
-          return { ...u, attendances: userUpdates.get(u.id)! };
+        if (selectedInviteeIds.includes(u.id)) {
+          return { ...u, attendances: [] };
         }
         return u;
       }));
@@ -716,37 +700,37 @@ export default function App() {
 
   // Invitees data derived from users attendances
   const inviteesData = React.useMemo(() => {
-    let result = users.flatMap(user => {
-      if (!user.attendances || user.attendances.length === 0) return [];
-      return user.attendances.map(att => ({
-        user: user,
-        attendance: att
-      }));
-    });
+    let result = users.filter(user => user.attendances && user.attendances.length > 0);
 
     if (inviteeSearchTerm) {
       const lowerSearch = inviteeSearchTerm.toLowerCase();
-      result = result.filter(item => 
-        `${item.user.firstName} ${item.user.lastName}`.toLowerCase().includes(lowerSearch) ||
-        (item.user.email && item.user.email.toLowerCase().includes(lowerSearch)) ||
-        (item.user.company && item.user.company.toLowerCase().includes(lowerSearch))
+      result = result.filter(user => 
+        `${user.firstName} ${user.lastName}`.toLowerCase().includes(lowerSearch) ||
+        (user.email && user.email.toLowerCase().includes(lowerSearch)) ||
+        (user.company && user.company.toLowerCase().includes(lowerSearch))
       );
     }
 
     if (inviteeEventFilter !== "all") {
-      result = result.filter(item => item.attendance.event.id === inviteeEventFilter);
+      result = result.filter(user => user.attendances?.some(att => att.event.id === inviteeEventFilter));
     }
 
     if (inviteeStatusFilter !== "all") {
-      result = result.filter(item => item.attendance.attendanceStatus === inviteeStatusFilter);
+      result = result.filter(user => {
+        if (inviteeEventFilter !== "all") {
+           return user.attendances?.some(att => att.event.id === inviteeEventFilter && att.attendanceStatus === inviteeStatusFilter);
+        } else {
+           return user.attendances?.some(att => att.attendanceStatus === inviteeStatusFilter);
+        }
+      });
     }
 
     if (inviteeCompanyFilter !== "all") {
-      result = result.filter(item => {
+      result = result.filter(user => {
         if (inviteeCompanyFilter === "Serbest / Tanımsız") {
-          return !item.user.company || item.user.company.trim() === "";
+          return !user.company || user.company.trim() === "";
         }
-        return item.user.company === inviteeCompanyFilter;
+        return user.company === inviteeCompanyFilter;
       });
     }
 
@@ -755,20 +739,20 @@ export default function App() {
         let aValue = "";
         let bValue = "";
         if (inviteeSortConfig.key === "name") {
-          aValue = `${a.user.firstName} ${a.user.lastName}`.toLowerCase();
-          bValue = `${b.user.firstName} ${b.user.lastName}`.toLowerCase();
+          aValue = `${a.firstName} ${a.lastName}`.toLowerCase();
+          bValue = `${b.firstName} ${b.lastName}`.toLowerCase();
         } else if (inviteeSortConfig.key === "email") {
-          aValue = (a.user.email || "").toLowerCase();
-          bValue = (b.user.email || "").toLowerCase();
+          aValue = (a.email || "").toLowerCase();
+          bValue = (b.email || "").toLowerCase();
         } else if (inviteeSortConfig.key === "company") {
-          aValue = (a.user.company || "").toLowerCase();
-          bValue = (b.user.company || "").toLowerCase();
-        } else if (inviteeSortConfig.key === "event") {
-          aValue = (a.attendance.event.name || "").toLowerCase();
-          bValue = (b.attendance.event.name || "").toLowerCase();
-        } else if (inviteeSortConfig.key === "status") {
-          aValue = (a.attendance.attendanceStatus || "").toLowerCase();
-          bValue = (b.attendance.attendanceStatus || "").toLowerCase();
+          aValue = (a.company || "").toLowerCase();
+          bValue = (b.company || "").toLowerCase();
+        } else if (inviteeSortConfig.key === "invitedCount") {
+          aValue = (a.attendances?.length || 0).toString().padStart(5, '0');
+          bValue = (b.attendances?.length || 0).toString().padStart(5, '0');
+        } else if (inviteeSortConfig.key === "attendedCount") {
+          aValue = (a.attendances?.filter(att => att.attendanceStatus === "Katıldı" || !att.attendanceStatus).length || 0).toString().padStart(5, '0');
+          bValue = (b.attendances?.filter(att => att.attendanceStatus === "Katıldı" || !att.attendanceStatus).length || 0).toString().padStart(5, '0');
         }
         
         if (aValue < bValue) return inviteeSortConfig.direction === 'asc' ? -1 : 1;
@@ -2032,7 +2016,7 @@ export default function App() {
                                 className="rounded border-[#36373d] bg-[#1e1f22] text-[#5865f2] focus:ring-0 focus:ring-offset-0 cursor-pointer"
                                 checked={inviteesData.length > 0 && selectedInviteeIds.length === inviteesData.length}
                                 onChange={(e) => {
-                                  if (e.target.checked) setSelectedInviteeIds(inviteesData.map(d => `${d.user.id}-${d.attendance.event.id}`));
+                                  if (e.target.checked) setSelectedInviteeIds(inviteesData.map(user => user.id));
                                   else setSelectedInviteeIds([]);
                                 }}
                               />
@@ -2046,25 +2030,24 @@ export default function App() {
                             <th className="px-6 py-4 cursor-pointer hover:text-white transition-colors" onClick={() => handleInviteeSort('company')}>
                               <div className="flex items-center gap-1">Kurum / Şube <ArrowUpDown className="w-3 h-3" /></div>
                             </th>
-                            <th className="px-6 py-4 cursor-pointer hover:text-white transition-colors" onClick={() => handleInviteeSort('event')}>
-                              <div className="flex items-center gap-1">Etkinlik <ArrowUpDown className="w-3 h-3" /></div>
+                            <th className="px-6 py-4 cursor-pointer hover:text-white transition-colors" onClick={() => handleInviteeSort('invitedCount')}>
+                              <div className="flex items-center gap-1">Davet Sayısı <ArrowUpDown className="w-3 h-3" /></div>
                             </th>
-                            <th className="px-6 py-4 cursor-pointer hover:text-white transition-colors" onClick={() => handleInviteeSort('status')}>
-                              <div className="flex items-center gap-1">Durum <ArrowUpDown className="w-3 h-3" /></div>
+                            <th className="px-6 py-4 cursor-pointer hover:text-white transition-colors" onClick={() => handleInviteeSort('attendedCount')}>
+                              <div className="flex items-center gap-1">Katılım Sayısı <ArrowUpDown className="w-3 h-3" /></div>
                             </th>
                             <th className="px-6 py-4 text-right">İşlem</th>
                           </tr>
                         </thead>
                         <tbody className="text-sm text-gray-300 divide-y divide-[#1e1f22]">
-                          {inviteesData.map((data, idx) => {
-                            const { user, attendance } = data;
-                            const isKatildi = attendance.attendanceStatus === "Katıldı";
+                          {inviteesData.map((user, idx) => {
+                            const invitedCount = user.attendances?.length || 0;
+                            const attendedCount = user.attendances?.filter(a => a.attendanceStatus === "Katıldı" || !a.attendanceStatus).length || 0;
                             const initials = `${user.firstName?.[0] || ""}${user.lastName?.[0] || ""}`.toUpperCase() || "TP";
-                            const attendanceId = `${user.id}-${attendance.event.id}`;
 
                             return (
                               <tr 
-                                key={`${attendanceId}-${idx}`} 
+                                key={`${user.id}-${idx}`} 
                                 className="discord-hover transition-colors group cursor-pointer"
                                 onClick={() => setSelectedUser(user)}
                               >
@@ -2072,10 +2055,10 @@ export default function App() {
                                   <input 
                                     type="checkbox" 
                                     className="rounded border-[#36373d] bg-[#1e1f22] text-[#5865f2] focus:ring-0 focus:ring-offset-0 cursor-pointer"
-                                    checked={selectedInviteeIds.includes(attendanceId)}
+                                    checked={selectedInviteeIds.includes(user.id)}
                                     onChange={(e) => {
-                                      if (e.target.checked) setSelectedInviteeIds([...selectedInviteeIds, attendanceId]);
-                                      else setSelectedInviteeIds(selectedInviteeIds.filter(id => id !== attendanceId));
+                                      if (e.target.checked) setSelectedInviteeIds([...selectedInviteeIds, user.id]);
+                                      else setSelectedInviteeIds(selectedInviteeIds.filter(id => id !== user.id));
                                     }}
                                   />
                                 </td>
@@ -2089,23 +2072,19 @@ export default function App() {
                                 </td>
                                 <td className="px-6 py-4 text-[12px] text-gray-400 font-mono">{user.email || "-"}</td>
                                 <td className="px-6 py-4 text-[#dbdee1]">{user.company || "Serbest / Tanımsız"}</td>
-                                <td className="px-6 py-4 text-[#b5bac1] max-w-[200px] truncate" title={attendance.event.name}>
-                                  {attendance.event.name}
+                                <td className="px-6 py-4 text-[#b5bac1] font-bold">
+                                  {invitedCount}
                                 </td>
-                                <td className="px-6 py-4">
-                                  {isKatildi ? (
-                                    <span className="px-2.5 py-0.5 rounded bg-green-500/10 text-green-400 text-[10px] font-bold border border-green-500/20 uppercase">KATILDI</span>
-                                  ) : (
-                                    <span className="px-2.5 py-0.5 rounded bg-yellow-500/10 text-yellow-400 text-[10px] font-bold border border-yellow-500/20 uppercase">DAVETLİ (KATILMADI)</span>
-                                  )}
+                                <td className="px-6 py-4 font-bold text-[#5865f2]">
+                                  {attendedCount}
                                 </td>
                                 <td className="px-6 py-4 text-right">
                                   <div className="flex items-center justify-end gap-3">
                                     {currentUser?.role === 'admin' && (
                                       <button 
-                                        onClick={(e) => { e.stopPropagation(); handleDeleteInvitee(user.id, attendance.event.id); }}
+                                        onClick={(e) => { e.stopPropagation(); handleDeleteInvitee(user.id); }}
                                         className="text-gray-500 hover:text-red-400 font-semibold text-xs transition-colors flex items-center p-1 rounded hover:bg-red-500/10"
-                                        title="Kaydı Sil"
+                                        title="Kişinin Tüm Davetlerini Sil"
                                       >
                                         <Trash2 className="w-4 h-4" />
                                       </button>
@@ -3059,6 +3038,20 @@ export default function App() {
                         <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">İletişim Bilgileri</p>
                         <p className="text-sm text-white font-semibold font-mono">{selectedUser.phone || "+90 532 000 00 00"}</p>
                         <p className="text-xs text-gray-400 font-mono break-all">{selectedUser.email || "e-posta tanımsız"}</p>
+                      </div>
+
+                      {/* Davet ve Katılım Özeti */}
+                      <div className="bg-[#313338] p-4 rounded-lg border border-[#36373d] flex justify-between items-center">
+                        <div className="text-center flex-1 border-r border-[#1e1f22]">
+                          <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-1">Davet Edildiği</p>
+                          <p className="text-xl text-white font-bold">{selectedUser.attendances?.length || 0}</p>
+                        </div>
+                        <div className="text-center flex-1">
+                          <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mb-1">Katıldığı</p>
+                          <p className="text-xl text-[#5865f2] font-bold">
+                            {selectedUser.attendances?.filter(a => a.attendanceStatus === "Katıldı" || !a.attendanceStatus).length || 0}
+                          </p>
+                        </div>
                       </div>
                     </>
                   )}
