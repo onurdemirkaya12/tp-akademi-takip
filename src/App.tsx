@@ -31,7 +31,8 @@ import {
   Info,
   Trash2,
   Sliders,
-  LayoutDashboard
+  LayoutDashboard,
+  Mail
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
@@ -39,7 +40,7 @@ import { read, utils, writeFile } from "xlsx";
 import { db } from "./firebase";
 import { collection, getDocs, getDoc, doc, setDoc, writeBatch, arrayUnion, deleteDoc } from "firebase/firestore";
 
-type TabType = "dashboard" | "participants" | "events" | "exams" | "upload" | "settings";
+type TabType = "dashboard" | "invitees" | "participants" | "events" | "exams" | "upload" | "settings";
 
 interface DropdownSettings {
   eventTypes: string[];
@@ -109,12 +110,18 @@ interface EventData {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>("dashboard");
+
+  // Invitees tab specific state
+  const [inviteeSearchTerm, setInviteeSearchTerm] = useState("");
+  const [inviteeEventFilter, setInviteeEventFilter] = useState("all");
+  const [inviteeStatusFilter, setInviteeStatusFilter] = useState("all");
   const [users, setUsers] = useState<UserData[]>([]);
   const [events, setEvents] = useState<EventData[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchTerm, setSearchTerm] = useState("");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
+  const [selectedInviteeIds, setSelectedInviteeIds] = useState<string[]>([]);
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
 
   // Detail panel state
@@ -137,7 +144,8 @@ export default function App() {
   const [parsedRows, setParsedRows] = useState<any[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const [uploadStatusMsg, setUploadStatusMsg] = useState("");
-  const [uploadType, setUploadType] = useState<"event" | "exam">("event");
+  const [uploadType, setUploadType] = useState<"event" | "invitee" | "exam">("invitee");
+  const [targetEventForUpload, setTargetEventForUpload] = useState<EventData | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Event Form Modal State
@@ -307,6 +315,66 @@ export default function App() {
     }
   };
 
+  const handleDeleteInvitee = async (userId: string, eventId: string) => {
+    if (!window.confirm("Bu davetli kaydını silmek istediğinize emin misiniz?")) return;
+    try {
+      const user = users.find(u => u.id === userId);
+      if (!user) return;
+      
+      const newAttendances = (user.attendances || []).filter(a => a.event.id !== eventId);
+      
+      await setDoc(doc(db, "users", userId), { attendances: newAttendances }, { merge: true });
+      
+      setUsers(users.map(u => u.id === userId ? { ...u, attendances: newAttendances } : u));
+      setSelectedInviteeIds(selectedInviteeIds.filter(id => id !== `${userId}-${eventId}`));
+    } catch (error) {
+      console.error("Davetli silinirken hata:", error);
+      alert("Silme işlemi başarısız oldu.");
+    }
+  };
+
+  const handleBulkDeleteInvitees = async () => {
+    if (selectedInviteeIds.length === 0) return;
+    if (!window.confirm(`Seçilen ${selectedInviteeIds.length} davetli kaydını silmek istediğinize emin misiniz?`)) return;
+    try {
+      setLoading(true);
+      const batch = writeBatch(db);
+      const userUpdates = new Map<string, any[]>();
+      
+      selectedInviteeIds.forEach(idPair => {
+        const userId = idPair.split("-")[0];
+        const actualEventId = idPair.substring(userId.length + 1);
+        
+        if (!userUpdates.has(userId)) {
+          const user = users.find(u => u.id === userId);
+          userUpdates.set(userId, user?.attendances || []);
+        }
+        
+        const currentAttendances = userUpdates.get(userId) || [];
+        userUpdates.set(userId, currentAttendances.filter(a => a.event.id !== actualEventId));
+      });
+      
+      userUpdates.forEach((newAttendances, userId) => {
+        batch.set(doc(db, "users", userId), { attendances: newAttendances }, { merge: true });
+      });
+      
+      await batch.commit();
+      
+      setUsers(users.map(u => {
+        if (userUpdates.has(u.id)) {
+          return { ...u, attendances: userUpdates.get(u.id)! };
+        }
+        return u;
+      }));
+      setSelectedInviteeIds([]);
+    } catch (error) {
+      console.error("Toplu davetli silme hatası:", error);
+      alert("Toplu silme işlemi başarısız oldu.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleSort = (key: string) => {
     let direction: 'asc' | 'desc' = 'asc';
     if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
@@ -316,7 +384,15 @@ export default function App() {
   };
 
   const sortedUsers = React.useMemo(() => {
-    let sortableUsers = [...users];
+    let sortableUsers = users.filter(u => {
+      // 1. En az bir "Katıldı" durumu olanlar (veya eski format olan durum belirtilmeyenler)
+      const hasActualAttendance = u.attendances?.some(a => a.attendanceStatus === "Katıldı" || !a.attendanceStatus);
+      
+      // 2. Sınav sonucu olanlar
+      const hasExamResults = u.examResults && u.examResults.length > 0;
+      
+      return hasActualAttendance || hasExamResults;
+    });
     if (sortConfig !== null) {
       sortableUsers.sort((a, b) => {
         let aValue = "";
@@ -350,6 +426,36 @@ export default function App() {
     event.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
     (event.location && event.location.toLowerCase().includes(searchTerm.toLowerCase()))
   );
+
+  // Invitees data derived from users attendances
+  const inviteesData = React.useMemo(() => {
+    let result = users.flatMap(user => {
+      if (!user.attendances || user.attendances.length === 0) return [];
+      return user.attendances.map(att => ({
+        user: user,
+        attendance: att
+      }));
+    });
+
+    if (inviteeSearchTerm) {
+      const lowerSearch = inviteeSearchTerm.toLowerCase();
+      result = result.filter(item => 
+        `${item.user.firstName} ${item.user.lastName}`.toLowerCase().includes(lowerSearch) ||
+        (item.user.email && item.user.email.toLowerCase().includes(lowerSearch)) ||
+        (item.user.company && item.user.company.toLowerCase().includes(lowerSearch))
+      );
+    }
+
+    if (inviteeEventFilter !== "all") {
+      result = result.filter(item => item.attendance.event.id === inviteeEventFilter);
+    }
+
+    if (inviteeStatusFilter !== "all") {
+      result = result.filter(item => item.attendance.attendanceStatus === inviteeStatusFilter);
+    }
+
+    return result;
+  }, [users, inviteeSearchTerm, inviteeEventFilter, inviteeStatusFilter]);
 
   // Drag & drop handlers
   const handleDrag = (e: React.DragEvent) => {
@@ -430,7 +536,7 @@ export default function App() {
         const json = [];
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-        if (uploadType === "event") {
+        if (uploadType === "event" || uploadType === "invitee") {
           const idxAd = getColumnIndex(["adı", "ad", "firstname", "first name", "name", "isim", "adınız"]);
           const idxSoyad = getColumnIndex(["soyadı", "soyad", "lastname", "last name", "soyisim", "soyadınız"]);
           const idxEmail = getColumnIndex(["email", "e-posta", "eposta", "e-mail"]);
@@ -439,7 +545,7 @@ export default function App() {
 
           // Validate Header Structure
           if (idxAd === -1 || idxSoyad === -1 || idxEmail === -1) {
-            showToast("Yükleme İptal Edildi: Eğitim şablonunda 'Adı', 'Soyadı' veya 'Email' sütunları eksik.", "error");
+            showToast(`Yükleme İptal Edildi: Şablonda 'Adı', 'Soyadı' veya 'Email' sütunları eksik.`, "error");
             setUploadProgress(null);
             return;
           }
@@ -556,12 +662,12 @@ export default function App() {
     let ws;
     let fileName = "";
 
-    if (uploadType === "event") {
+    if (uploadType === "event" || uploadType === "invitee") {
       ws = utils.aoa_to_sheet([
         ["Ad", "Soyad", "E-Posta", "Telefon", "Firma"],
         ["Ahmet", "Arık", "ahmet.arik@tp-link.com", "05551234567", "TP-Link"]
       ]);
-      fileName = "Egitim_Katilim_Sablonu.xlsx";
+      fileName = uploadType === "invitee" ? "Davetli_Sablonu.xlsx" : "Egitim_Katilim_Sablonu.xlsx";
     } else {
       ws = utils.aoa_to_sheet([
         ["Ad", "Soyad", "E-Posta", "Telefon", "Firma", "Puan"],
@@ -579,12 +685,24 @@ export default function App() {
     if (parsedRows.length === 0) return;
     try {
       setLoading(true);
-      const batch = writeBatch(db);
+      
+      let batch = writeBatch(db);
+      let operationCount = 0;
       let processed = 0;
 
-      if (uploadType === "event") {
-        const generatedEventName = eventFormData.content || eventFormData.eventType || "Genel Eğitim";
-        const eventId = generatedEventName.replace(/[^a-zA-Z0-9]/g, "") + "-" + Date.now();
+      const commitBatchIfNeeded = async () => {
+        if (operationCount >= 400) {
+          await batch.commit();
+          batch = writeBatch(db);
+          operationCount = 0;
+        }
+      };
+
+      if (uploadType === "event" || uploadType === "invitee") {
+        const generatedEventName = targetEventForUpload ? targetEventForUpload.name : (eventFormData.content || eventFormData.eventType || "Genel Eğitim");
+        const eventDate = targetEventForUpload && targetEventForUpload.date ? targetEventForUpload.date.split("T")[0] : (eventFormData.date ? eventFormData.date.split("T")[0] : "NoDate");
+        const eventId = targetEventForUpload ? targetEventForUpload.id : `${generatedEventName.replace(/[^a-zA-Z0-9]/g, "")}-${eventDate}`;
+        const attendanceStatus = uploadType === "invitee" ? "Davetli" : "Katıldı";
         
         for (const row of parsedRows) {
           const firstName = row["Adı"];
@@ -598,12 +716,28 @@ export default function App() {
           const userId = email ? email.replace(/[^a-zA-Z0-9]/g, "") : `${firstName}${lastName}`.replace(/[^a-zA-Z0-9]/g, "");
           const existingUser = users.find(u => u.id === userId);
           
+          // Check if this attendance already exists to handle upgrades (Davetli -> Katıldı)
+          let existingAttendances = existingUser?.attendances || [];
+          let currentAttendance = existingAttendances.find(a => a.event.id === eventId);
+          
+          let updatedAttendances = [...existingAttendances];
+          
+          if (currentAttendance) {
+            // Upgrade to "Katıldı" if it was "Davetli" and we are uploading an "event" list
+            if (attendanceStatus === "Katıldı") {
+               currentAttendance.attendanceStatus = "Katıldı";
+            }
+          } else {
+            updatedAttendances.push({
+              id: `${userId}-${eventId}`,
+              attendanceStatus: attendanceStatus,
+              event: { id: eventId, name: generatedEventName, date: eventFormData.date || new Date().toISOString() }
+            });
+          }
+
           let updatedData: any = {
             firstName, lastName, email, phone,
-            attendances: arrayUnion({
-              id: `${userId}-${eventId}`,
-              event: { id: eventId, name: generatedEventName, date: eventFormData.date || new Date().toISOString() }
-            })
+            attendances: updatedAttendances
           };
 
           if (company && (!existingUser || existingUser.company !== company)) {
@@ -612,25 +746,37 @@ export default function App() {
 
           const userRef = doc(db, "users", userId);
           batch.set(userRef, updatedData, { merge: true });
+          operationCount++;
 
           const eventRef = doc(db, "events", eventId);
-          batch.set(eventRef, {
-            name: generatedEventName,
-            date: eventFormData.date || new Date().toISOString(),
-            eventType: eventFormData.eventType,
-            trainer: eventFormData.trainer,
-            purpose: eventFormData.purpose,
-            content: eventFormData.content,
-            description: eventFormData.description,
-            attendances: arrayUnion({
+          const eventDataToSave: any = {
+            name: generatedEventName
+          };
+
+          if (uploadType === "event") {
+            eventDataToSave.attendances = arrayUnion({
               id: `${userId}-${eventId}`,
-              user: { id: userId, firstName, lastName, company }
-            })
-          }, { merge: true });
+              attendanceStatus: attendanceStatus,
+              user: { id: userId, firstName, lastName, email, company }
+            });
+          }
+          
+          if (!targetEventForUpload) {
+            eventDataToSave.date = eventFormData.date || new Date().toISOString();
+            eventDataToSave.eventType = eventFormData.eventType;
+            eventDataToSave.trainer = eventFormData.trainer;
+            eventDataToSave.purpose = eventFormData.purpose;
+            eventDataToSave.content = eventFormData.content;
+            eventDataToSave.description = eventFormData.description;
+          }
+          
+          batch.set(eventRef, eventDataToSave, { merge: true });
+          operationCount++;
           
           processed++;
+          await commitBatchIfNeeded();
         }
-        setUploadStatusMsg(`Başarılı! ${processed} katılımcı "${generatedEventName}" etkinliğine eklendi.`);
+        setUploadStatusMsg(`Başarılı! ${processed} kişi "${generatedEventName}" etkinliğine ${uploadType === "invitee" ? "davetli" : "katılımcı"} olarak eklendi.`);
       } else if (uploadType === "exam") {
         const uploadedEmails = parsedRows.map(r => String(r["Email"]).toLowerCase()).filter(Boolean);
         const passingScore = 60; // Geçme Notu 60 olarak baz alınmıştır
@@ -688,7 +834,9 @@ export default function App() {
           const updatedResults = [...filteredResults, newExamResult];
 
           batch.update(userRef, { examStatus: status, examResults: updatedResults });
+          operationCount++;
           processed++;
+          await commitBatchIfNeeded();
         }
 
         // Check absentees
@@ -696,15 +844,20 @@ export default function App() {
           if (user.examStatus === "Sınava Davet Edildi" && user.email && !uploadedEmails.includes(user.email.toLowerCase())) {
             const userRef = doc(db, "users", user.id);
             batch.update(userRef, { examStatus: "Sınava Katılmadı" });
+            operationCount++;
+            await commitBatchIfNeeded();
           }
         }
         setUploadStatusMsg(`Başarılı! ${processed} sınav sonucu işlendi.`);
       }
 
-      await batch.commit();
+      if (operationCount > 0) {
+        await batch.commit();
+      }
       
       setParsedRows([]);
       setIsEventModalOpen(false);
+      setTargetEventForUpload(null);
       fetchData();
       setActiveTab("participants");
     } catch (error) {
@@ -993,10 +1146,7 @@ export default function App() {
     }, 500);
   };
 
-  const handleAssignExamToAttendees = async () => {
-    if (!selectedEvent) return;
-    showToast("Katıldı olarak işaretlenen tüm kullanıcılara 'Sınava Davet Edildi' statüsü atandı.", "success");
-  };
+  // Sınav tanımla sistemi kaldırıldı
 
   return (
     <div id="discord-app" className="flex h-screen w-screen overflow-hidden bg-[#1e1f22] text-[#dbdee1] select-none font-sans">
@@ -1031,6 +1181,18 @@ export default function App() {
           >
             <LayoutDashboard className="w-4 h-4 text-[#80848e] group-hover:text-white transition-colors" />
             <span>Ana Sayfa</span>
+          </button>
+
+          <button
+            onClick={() => { setActiveTab("invitees"); setSelectedEvent(null); setSelectedUser(null); }}
+            className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 group ${
+              activeTab === "invitees" 
+                ? "active-nav font-semibold" 
+                : "text-[#b5bac1] discord-hover"
+            }`}
+          >
+            <Mail className="w-4 h-4 text-[#80848e] group-hover:text-white transition-colors" />
+            <span>Davetliler</span>
           </button>
 
           <button
@@ -1192,20 +1354,48 @@ export default function App() {
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                   <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden">
                     <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Toplam Katılım</span>
-                    <span className="text-3xl font-bold text-white">{users.reduce((acc, u) => acc + (u.attendances?.length || 0), 0)}</span>
+                    <span className="text-3xl font-bold text-white">
+                      {users.reduce((acc, u) => acc + (u.attendances?.filter(a => a.attendanceStatus === "Katıldı" || !a.attendanceStatus).length || 0), 0)}
+                    </span>
                     <span className="text-xs text-[#b5bac1] mt-1">Eğitimlere yapılan toplam kayıt</span>
                   </div>
                   <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden">
                     <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Uniq Katılımcı</span>
-                    <span className="text-3xl font-bold text-white">{users.length}</span>
+                    <span className="text-3xl font-bold text-white">{sortedUsers.length}</span>
                     <span className="text-xs text-[#b5bac1] mt-1">Sisteme kayıtlı tekil kullanıcı</span>
                   </div>
                   <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden">
                     <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Katılım / Tekil Oranı</span>
                     <span className="text-3xl font-bold text-white">
-                      {users.length > 0 ? (users.reduce((acc, u) => acc + (u.attendances?.length || 0), 0) / users.length).toFixed(1) : "0"}
+                      {sortedUsers.length > 0 ? (users.reduce((acc, u) => acc + (u.attendances?.filter(a => a.attendanceStatus === "Katıldı" || !a.attendanceStatus).length || 0), 0) / sortedUsers.length).toFixed(1) : "0"}
                     </span>
                     <span className="text-xs text-[#b5bac1] mt-1">Kişi başı ortalama eğitim sayısı</span>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === "invitees" && (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden">
+                    <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Toplam Davetli</span>
+                    <span className="text-3xl font-bold text-white">
+                      {users.reduce((acc, u) => acc + (u.attendances?.length || 0), 0)}
+                    </span>
+                    <span className="text-xs text-[#b5bac1] mt-1">Sisteme yüklenen tüm davetler</span>
+                  </div>
+                  <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden">
+                    <span className="text-xs font-bold text-green-500 uppercase tracking-wider">Toplam Katılım</span>
+                    <span className="text-3xl font-bold text-white">
+                      {users.reduce((acc, u) => acc + (u.attendances?.filter(a => a.attendanceStatus === "Katıldı" || !a.attendanceStatus).length || 0), 0)}
+                    </span>
+                    <span className="text-xs text-[#b5bac1] mt-1">Gerçekleşen toplam katılım</span>
+                  </div>
+                  <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden">
+                    <span className="text-xs font-bold text-red-500 uppercase tracking-wider">Toplam Katılmayan</span>
+                    <span className="text-3xl font-bold text-white">
+                      {users.reduce((acc, u) => acc + (u.attendances?.filter(a => a.attendanceStatus === "Davetli").length || 0), 0)}
+                    </span>
+                    <span className="text-xs text-[#b5bac1] mt-1">Henüz katılım sağlamamış davetliler</span>
                   </div>
                 </div>
               )}
@@ -1257,42 +1447,33 @@ export default function App() {
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                     <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden group">
                       <div className="absolute top-0 right-0 w-24 h-24 bg-[#5865f2]/5 rounded-full blur-xl group-hover:bg-[#5865f2]/10 transition-colors duration-300"></div>
-                      <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Aktif Katılımcılar</span>
+                      <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Toplam Davetli</span>
                       <div className="flex items-baseline gap-2">
-                        <span className="text-3xl font-bold text-white">{users.length}</span>
-                        <span className="text-[10px] text-green-400 font-semibold bg-green-500/10 px-1.5 py-0.5 rounded">+%12 geçen aydan beri</span>
+                        <span className="text-3xl font-bold text-white">
+                          {users.reduce((acc, u) => acc + (u.attendances?.length || 0), 0)}
+                        </span>
                       </div>
-                      <span className="text-xs text-[#b5bac1] mt-1">Sisteme kayıtlı tekil öğrenci sayısı</span>
+                      <span className="text-xs text-[#b5bac1] mt-1">Sisteme yüklenen tüm davetler</span>
                     </div>
 
                     <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden group">
-                      <div className="absolute top-0 right-0 w-24 h-24 bg-[#5865f2]/5 rounded-full blur-xl group-hover:bg-[#5865f2]/10 transition-colors duration-300"></div>
-                      <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Tamamlanan Sınavlar</span>
+                      <div className="absolute top-0 right-0 w-24 h-24 bg-green-500/5 rounded-full blur-xl group-hover:bg-green-500/10 transition-colors duration-300"></div>
+                      <span className="text-xs font-bold text-green-500 uppercase tracking-wider">Toplam Katılımcı</span>
                       <div className="flex items-baseline gap-2">
                         <span className="text-3xl font-bold text-white">
-                          {users.reduce((acc, u) => acc + (u.examResults?.length || 0), 0)}
+                          {users.reduce((acc, u) => acc + (u.attendances?.filter(a => a.attendanceStatus === "Katıldı" || !a.attendanceStatus).length || 0), 0)}
                         </span>
-                        <span className="text-[10px] text-[#5865f2] font-semibold bg-[#5865f2]/10 px-1.5 py-0.5 rounded">Toplam Sertifika</span>
                       </div>
-                      <span className="text-xs text-[#b5bac1] mt-1">Akademi sınavlarına giren kişi sayısı</span>
+                      <span className="text-xs text-[#b5bac1] mt-1">Gerçekleşen toplam katılım</span>
                     </div>
 
-                    <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden">
-                      <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Genel Başarı Oranı</span>
+                    <div className="bg-[#313338] p-5 rounded-lg anti-gravity flex flex-col gap-1.5 border border-[#36373d]/50 relative overflow-hidden group">
+                      <div className="absolute top-0 right-0 w-24 h-24 bg-yellow-500/5 rounded-full blur-xl group-hover:bg-yellow-500/10 transition-colors duration-300"></div>
+                      <span className="text-xs font-bold text-yellow-500 uppercase tracking-wider">Toplam Sınavı Geçenler</span>
                       <span className="text-3xl font-bold text-white">
-                        {(() => {
-                          const total = users.reduce((acc, u) => acc + (u.examResults?.length || 0), 0);
-                          const passed = users.reduce((acc, u) => acc + (u.examResults?.filter(r => r.status === "Geçti").length || 0), 0);
-                          return total > 0 ? ((passed / total) * 100).toFixed(1) : "0";
-                        })()}%
+                        {users.reduce((acc, u) => acc + (u.examResults?.filter(r => r.status === "Geçti").length || 0), 0)}
                       </span>
-                      <div className="w-full bg-[#1e1f22] h-2 mt-2 rounded-full overflow-hidden">
-                        <div className="bg-[#5865f2] h-full rounded-full transition-all duration-1000" style={{ width: (() => {
-                          const total = users.reduce((acc, u) => acc + (u.examResults?.length || 0), 0);
-                          const passed = users.reduce((acc, u) => acc + (u.examResults?.filter(r => r.status === "Geçti").length || 0), 0);
-                          return total > 0 ? ((passed / total) * 100).toFixed(1) : "0";
-                        })() + "%" }}></div>
-                      </div>
+                      <span className="text-xs text-[#b5bac1] mt-1">Sınavı başarıyla tamamlayanlar</span>
                     </div>
                   </div>
 
@@ -1353,6 +1534,160 @@ export default function App() {
                   </div>
                 </div>
               )}
+              {activeTab === "invitees" && (
+                <div className="bg-[#313338] rounded-lg flex flex-col anti-gravity overflow-hidden border border-[#36373d]/40">
+                  <div className="p-5 border-b border-[#1e1f22] bg-[#2b2d31]/30 flex justify-between items-center flex-wrap gap-4">
+                    <div>
+                      <h3 className="text-white font-bold text-base">Davetli ve Katılımcı Listesi</h3>
+                      <p className="text-xs text-gray-500">Etkinliklere davet edilen kişileri ve katılım durumlarını buradan takip edebilirsiniz.</p>
+                    </div>
+                    <div className="flex gap-4 items-center">
+                      <div className="relative">
+                        <input 
+                          type="text" 
+                          placeholder="İsim, e-posta veya kurum ara..." 
+                          value={inviteeSearchTerm}
+                          onChange={(e) => setInviteeSearchTerm(e.target.value)}
+                          className="bg-[#1e1f22] border border-[#2b2d31] rounded-md px-4 py-1.5 pl-9 text-sm focus:outline-none focus:border-[#5865f2] w-64 text-white placeholder-gray-500 transition-all duration-300"
+                        />
+                        <Search className="w-4 h-4 absolute left-3 top-2.5 text-gray-500" />
+                      </div>
+                      
+                      <select 
+                        value={inviteeEventFilter}
+                        onChange={(e) => setInviteeEventFilter(e.target.value)}
+                        className="bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-1.5 text-sm focus:outline-none focus:border-[#5865f2] text-white"
+                      >
+                        <option value="all">Tüm Etkinlikler</option>
+                        {events.map(ev => <option key={ev.id} value={ev.id}>{ev.name}</option>)}
+                      </select>
+
+                      <select 
+                        value={inviteeStatusFilter}
+                        onChange={(e) => setInviteeStatusFilter(e.target.value)}
+                        className="bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-1.5 text-sm focus:outline-none focus:border-[#5865f2] text-white"
+                      >
+                        <option value="all">Tüm Durumlar</option>
+                        <option value="Davetli">Davetli (Katılmadı)</option>
+                        <option value="Katıldı">Katıldı</option>
+                      </select>
+                      {selectedInviteeIds.length > 0 && (
+                        <button 
+                          onClick={handleBulkDeleteInvitees}
+                          className="bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white px-3 py-1.5 rounded border border-red-500/20 font-bold text-xs transition-all flex items-center gap-1.5"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" /> Seçili {selectedInviteeIds.length} Kaydı Sil
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {loading ? (
+                    <div className="flex flex-col items-center justify-center py-24 gap-4">
+                      <div className="w-12 h-12 border-4 border-[#5865f2] border-t-transparent rounded-full animate-spin"></div>
+                      <span className="text-sm text-gray-400">Veriler yükleniyor...</span>
+                    </div>
+                  ) : inviteesData.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-20 text-center gap-4">
+                      <div className="w-16 h-16 rounded-full bg-[#1e1f22] flex items-center justify-center text-[#949ba4]">
+                        <Mail className="w-8 h-8" />
+                      </div>
+                      <div>
+                        <h4 className="text-white font-semibold text-lg">Davetli Bulunamadı</h4>
+                        <p className="text-xs text-gray-500 max-w-sm mt-1">
+                          Arama terimiyle eşleşen sonuç yok veya sisteme henüz veri yüklenmemiş.
+                        </p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse">
+                        <thead className="bg-[#1e1f22] text-[11px] uppercase font-bold text-gray-500">
+                          <tr>
+                            <th className="px-6 py-4 w-10">
+                              <input 
+                                type="checkbox" 
+                                className="rounded border-[#36373d] bg-[#1e1f22] text-[#5865f2] focus:ring-0 focus:ring-offset-0 cursor-pointer"
+                                checked={inviteesData.length > 0 && selectedInviteeIds.length === inviteesData.length}
+                                onChange={(e) => {
+                                  if (e.target.checked) setSelectedInviteeIds(inviteesData.map(d => `${d.user.id}-${d.attendance.event.id}`));
+                                  else setSelectedInviteeIds([]);
+                                }}
+                              />
+                            </th>
+                            <th className="px-6 py-4">Katılımcı / Davetli</th>
+                            <th className="px-6 py-4">E-Posta</th>
+                            <th className="px-6 py-4">Kurum / Şube</th>
+                            <th className="px-6 py-4">Etkinlik</th>
+                            <th className="px-6 py-4">Durum</th>
+                            <th className="px-6 py-4 text-right">İşlem</th>
+                          </tr>
+                        </thead>
+                        <tbody className="text-sm text-gray-300 divide-y divide-[#1e1f22]">
+                          {inviteesData.map((data, idx) => {
+                            const { user, attendance } = data;
+                            const isKatildi = attendance.attendanceStatus === "Katıldı";
+                            const initials = `${user.firstName?.[0] || ""}${user.lastName?.[0] || ""}`.toUpperCase() || "TP";
+                            const attendanceId = `${user.id}-${attendance.event.id}`;
+
+                            return (
+                              <tr 
+                                key={`${attendanceId}-${idx}`} 
+                                className="discord-hover transition-colors group cursor-pointer"
+                                onClick={() => setSelectedUser(user)}
+                              >
+                                <td className="px-6 py-4" onClick={(e) => e.stopPropagation()}>
+                                  <input 
+                                    type="checkbox" 
+                                    className="rounded border-[#36373d] bg-[#1e1f22] text-[#5865f2] focus:ring-0 focus:ring-offset-0 cursor-pointer"
+                                    checked={selectedInviteeIds.includes(attendanceId)}
+                                    onChange={(e) => {
+                                      if (e.target.checked) setSelectedInviteeIds([...selectedInviteeIds, attendanceId]);
+                                      else setSelectedInviteeIds(selectedInviteeIds.filter(id => id !== attendanceId));
+                                    }}
+                                  />
+                                </td>
+                                <td className="px-6 py-4 flex items-center gap-3">
+                                  <div className="w-8 h-8 rounded-full bg-[#5865f2] flex items-center justify-center text-white text-[11px] font-bold shadow-sm shadow-[#5865f2]/20">
+                                    {initials}
+                                  </div>
+                                  <div>
+                                    <p className="text-white font-medium group-hover:text-[#5865f2] transition-colors">{user.firstName} {user.lastName}</p>
+                                  </div>
+                                </td>
+                                <td className="px-6 py-4 text-[12px] text-gray-400 font-mono">{user.email || "-"}</td>
+                                <td className="px-6 py-4 text-[#dbdee1]">{user.company || "Serbest / Tanımsız"}</td>
+                                <td className="px-6 py-4 text-[#b5bac1] max-w-[200px] truncate" title={attendance.event.name}>
+                                  {attendance.event.name}
+                                </td>
+                                <td className="px-6 py-4">
+                                  {isKatildi ? (
+                                    <span className="px-2.5 py-0.5 rounded bg-green-500/10 text-green-400 text-[10px] font-bold border border-green-500/20 uppercase">KATILDI</span>
+                                  ) : (
+                                    <span className="px-2.5 py-0.5 rounded bg-yellow-500/10 text-yellow-400 text-[10px] font-bold border border-yellow-500/20 uppercase">DAVETLİ (KATILMADI)</span>
+                                  )}
+                                </td>
+                                <td className="px-6 py-4 text-right">
+                                  <div className="flex items-center justify-end gap-3">
+                                    <button 
+                                      onClick={(e) => { e.stopPropagation(); handleDeleteInvitee(user.id, attendance.event.id); }}
+                                      className="text-gray-500 hover:text-red-400 font-semibold text-xs transition-colors flex items-center p-1 rounded hover:bg-red-500/10"
+                                      title="Kaydı Sil"
+                                    >
+                                      <Trash2 className="w-4 h-4" />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {activeTab === "participants" && (
                 <div className="bg-[#313338] rounded-lg flex flex-col anti-gravity overflow-hidden border border-[#36373d]/40">
                   <div className="p-5 border-b border-[#1e1f22] bg-[#2b2d31]/30 flex justify-between items-center">
@@ -1436,8 +1771,9 @@ export default function App() {
                         </thead>
                         <tbody className="text-sm text-gray-300 divide-y divide-[#1e1f22]">
                           {filteredUsers.map((user) => {
-                            const attendancesList = user.attendances?.length > 0 
-                              ? user.attendances.map(a => a.event.name).join(", ") 
+                            const actualAttendances = user.attendances?.filter(a => a.attendanceStatus === "Katıldı" || !a.attendanceStatus) || [];
+                            const attendancesList = actualAttendances.length > 0 
+                              ? actualAttendances.map(a => a.event.name).join(", ") 
                               : "Katılım Yok";
                             
                             let statusBadge = (
@@ -1575,7 +1911,7 @@ export default function App() {
                             </div>
 
                             <div className="pt-3 border-t border-[#1e1f22] flex justify-between items-center text-xs">
-                              <span className="text-gray-500">Katılımcı Sayısı: <strong className="text-white">{event.attendances?.length || 0} kişi</strong></span>
+                              <span className="text-gray-500">Katılımcı Sayısı: <strong className="text-white">{event.attendances?.filter(a => a.attendanceStatus === "Katıldı" || !a.attendanceStatus).length || 0} kişi</strong></span>
                               <span className="text-[#5865f2] font-semibold">{event.exams?.length || 0} Sınav Tanımlı</span>
                             </div>
                           </div>
@@ -1692,14 +2028,15 @@ export default function App() {
                     <h3 className="text-white font-bold text-base mb-1">Toplu Veri İçe Aktarma (Excel Sihirbazı)</h3>
                     <p className="text-xs text-gray-500 mb-6">TP-Link Akademi sınav sonuç listesini doğrudan yükleyerek kullanıcıları, katılımları ve sınav durumlarını saniyeler içinde güncelleyin.</p>
 
-                    <div className="flex gap-4 mb-6">
-                      <label className={`flex items-center gap-2 cursor-pointer p-3 rounded-lg border transition-all ${uploadType === 'event' ? 'border-[#5865f2] bg-[#5865f2]/10' : 'border-[#36373d] bg-[#2b2d31]'}`}>
-                        <input type="radio" name="uploadType" value="event" checked={uploadType === 'event'} onChange={() => setUploadType('event')} className="hidden" />
-                        <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${uploadType === 'event' ? 'border-[#5865f2]' : 'border-gray-500'}`}>
-                          {uploadType === 'event' && <div className="w-2 h-2 rounded-full bg-[#5865f2]"></div>}
+                    <div className="flex gap-4 mb-6 flex-wrap">
+                      <label className={`flex items-center gap-2 cursor-pointer p-3 rounded-lg border transition-all ${uploadType === 'invitee' ? 'border-[#5865f2] bg-[#5865f2]/10' : 'border-[#36373d] bg-[#2b2d31]'}`}>
+                        <input type="radio" name="uploadType" value="invitee" checked={uploadType === 'invitee'} onChange={() => setUploadType('invitee')} className="hidden" />
+                        <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${uploadType === 'invitee' ? 'border-[#5865f2]' : 'border-gray-500'}`}>
+                          {uploadType === 'invitee' && <div className="w-2 h-2 rounded-full bg-[#5865f2]"></div>}
                         </div>
-                        <span className="text-sm font-bold text-white">Eğitim Katılım Listesi</span>
+                        <span className="text-sm font-bold text-white">Davetli Listesi</span>
                       </label>
+
                       <label className={`flex items-center gap-2 cursor-pointer p-3 rounded-lg border transition-all ${uploadType === 'exam' ? 'border-[#5865f2] bg-[#5865f2]/10' : 'border-[#36373d] bg-[#2b2d31]'}`}>
                         <input type="radio" name="uploadType" value="exam" checked={uploadType === 'exam'} onChange={() => setUploadType('exam')} className="hidden" />
                         <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${uploadType === 'exam' ? 'border-[#5865f2]' : 'border-gray-500'}`}>
@@ -1745,12 +2082,14 @@ export default function App() {
                       </div>
                       <div className="space-y-1">
                         <h4 className="text-white font-bold text-base">
-                          {uploadType === 'event' ? 'Eğitim Katılımcı Excelini Sürükleyip Bırakın' : 'Sınav Sonuç Excelini Sürükleyip Bırakın'}
+                          {uploadType === 'invitee' ? 'Eğitim Davetli Excelini Sürükleyip Bırakın' :
+                           uploadType === 'event' ? 'Eğitim Katılımcı Excelini Sürükleyip Bırakın' : 
+                           'Sınav Sonuç Excelini Sürükleyip Bırakın'}
                         </h4>
                         <p className="text-xs text-gray-500 max-w-md">
-                          {uploadType === 'event' 
-                            ? <><strong className="text-white">Ad, Soyad, E-Posta, Telefon, Firma</strong> sütunları bulunmalıdır.</>
-                            : <><strong className="text-white">Ad, Soyad, E-Posta, Telefon, Firma, Puan</strong> sütunları bulunmalıdır.</>
+                          {uploadType === 'exam' 
+                            ? <><strong className="text-white">Ad, Soyad, E-Posta, Telefon, Firma, Puan</strong> sütunları bulunmalıdır.</>
+                            : <><strong className="text-white">Ad, Soyad, E-Posta, Telefon, Firma</strong> sütunları bulunmalıdır.</>
                           }
                         </p>
                       </div>
@@ -1763,9 +2102,9 @@ export default function App() {
                     </div>
 
                     <div className="mt-6 flex flex-col items-center gap-3">
-                      {uploadType === "event" ? (
+                      {uploadType !== "exam" ? (
                         <p className="text-xs text-yellow-400 font-semibold bg-yellow-500/10 px-4 py-2 rounded-lg border border-yellow-500/20 text-center max-w-lg">
-                          Sisteme yüklenecek verilerin eşleşebilmesi için lütfen örnek şablondaki sütun yapısını kullanın. Eğitim listelerinde <strong>Adı, Soyadı ve Email</strong> alanları zorunludur.
+                          Sisteme yüklenecek verilerin eşleşebilmesi için lütfen örnek şablondaki sütun yapısını kullanın. Eğitim ve davetli listelerinde <strong>Adı, Soyadı ve Email</strong> alanları zorunludur.
                         </p>
                       ) : (
                         <p className="text-xs text-yellow-400 font-semibold bg-yellow-500/10 px-4 py-2 rounded-lg border border-yellow-500/20 text-center max-w-lg">
@@ -1776,7 +2115,9 @@ export default function App() {
                         onClick={handleDownloadTemplate}
                         className="text-[#5865f2] hover:text-white text-xs font-bold transition-colors underline decoration-[#5865f2]/40 hover:decoration-white underline-offset-4"
                       >
-                        {uploadType === "event" ? "Eğitim Şablonunu İndir (.xlsx)" : "Sınav Şablonunu İndir (.xlsx)"}
+                        {uploadType === "invitee" ? "Davetli Şablonunu İndir (.xlsx)" : 
+                         uploadType === "event" ? "Eğitim Şablonunu İndir (.xlsx)" : 
+                         "Sınav Şablonunu İndir (.xlsx)"}
                       </button>
                     </div>
 
@@ -1822,7 +2163,7 @@ export default function App() {
                           </button>
                           <button 
                             onClick={() => {
-                              if (uploadType === "event") {
+                              if ((uploadType === "event" || uploadType === "invitee") && !targetEventForUpload) {
                                 setIsEventModalOpen(true);
                               } else {
                                 saveImportedData();
@@ -2091,7 +2432,7 @@ export default function App() {
                   <div className="bg-[#313338] p-4 rounded-lg border border-[#36373d] space-y-3">
                     <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">Eğitim & Sınav Geçmişi</p>
                     
-                    {selectedUser.examResults?.length === 0 ? (
+                    {!selectedUser.examResults || selectedUser.examResults.length === 0 ? (
                       <div className="text-xs text-gray-500 py-2">
                         Henüz sınav sonucu tanımlanmamış.
                       </div>
@@ -2535,6 +2876,24 @@ export default function App() {
                   Etkinlik Detay ve Düzenleme
                 </h2>
                 <div className="flex items-center gap-3">
+                  <input
+                    type="file"
+                    accept=".xlsx, .xls"
+                    className="hidden"
+                    id="modalFileInput"
+                    onChange={(e) => {
+                      if (e.target.files?.[0]) {
+                        setTargetEventForUpload(selectedEvent);
+                        setUploadType("event");
+                        setActiveTab("upload");
+                        setSelectedEvent(null);
+                        processFile(e.target.files[0]);
+                      }
+                    }}
+                  />
+                  <label htmlFor="modalFileInput" className="cursor-pointer px-4 py-2 bg-[#5865f2] hover:bg-[#5865f2]/90 text-white text-sm font-bold rounded-lg transition-colors flex items-center gap-2">
+                    <FileSpreadsheet className="w-4 h-4" /> Katılımcı Listesi Ekle
+                  </label>
                   <button onClick={handleUpdateEvent} className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-bold rounded-lg transition-colors flex items-center gap-2">
                     <CheckCircle className="w-4 h-4" /> Değişiklikleri Kaydet
                   </button>
@@ -2604,11 +2963,8 @@ export default function App() {
                   <div className="flex justify-between items-end">
                     <div>
                       <h3 className="text-white font-bold text-lg">Katılımcı Yönetimi ve Yoklama</h3>
-                      <p className="text-xs text-gray-400">Bu eğitime kayıtlı {selectedEvent.attendances?.length || 0} kişi bulunuyor. Eğitime fiilen katılanları işaretleyin.</p>
+                      <p className="text-xs text-gray-400">Bu eğitime kayıtlı {selectedEvent.attendances?.filter(a => a.attendanceStatus === "Katıldı" || !a.attendanceStatus).length || 0} kişi bulunuyor. Eğitime fiilen katılanları işaretleyin.</p>
                     </div>
-                    <button onClick={handleAssignExamToAttendees} className="bg-yellow-600 hover:bg-yellow-700 text-white text-xs font-bold py-2 px-4 rounded-lg transition-colors flex items-center gap-2 shadow-lg shadow-yellow-600/20">
-                      <Award className="w-4 h-4" /> Seçililere Sınav Tanımla
-                    </button>
                   </div>
                   
                   <div className="flex-1 bg-[#1e1f22] border border-[#36373d] rounded-lg overflow-hidden flex flex-col">
@@ -2623,7 +2979,7 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-[#2b2d31]">
-                          {selectedEvent.attendances?.map((att, i) => (
+                          {selectedEvent.attendances?.filter(a => a.attendanceStatus === "Katıldı" || !a.attendanceStatus).map((att, i) => (
                             <tr key={i} className="hover:bg-[#2b2d31]/50 transition-colors">
                               <td className="px-4 py-3 text-center">
                                 <button 
@@ -2638,9 +2994,9 @@ export default function App() {
                               <td className="px-4 py-3 text-xs text-gray-400">{att.user.company || "-"}</td>
                             </tr>
                           ))}
-                          {(!selectedEvent.attendances || selectedEvent.attendances.length === 0) && (
+                          {(!selectedEvent.attendances || selectedEvent.attendances.filter(a => a.attendanceStatus === "Katıldı" || !a.attendanceStatus).length === 0) && (
                             <tr>
-                              <td colSpan={4} className="px-4 py-8 text-center text-sm text-gray-500">Bu etkinliğe henüz katılımcı eklenmemiş.</td>
+                              <td colSpan={4} className="px-4 py-8 text-center text-sm text-gray-500">Bu etkinliğe henüz katılımcı eklenmemiş. Sadece davetliler olabilir.</td>
                             </tr>
                           )}
                         </tbody>
