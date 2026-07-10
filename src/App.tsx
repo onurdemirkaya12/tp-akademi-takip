@@ -409,6 +409,19 @@ export default function App() {
     }
   };
 
+  const handleDeleteAdmin = async (userId: string, email: string) => {
+    if (window.confirm(`${email} e-posta adresine sahip kullanıcıyı sistemden silmek istediğinize emin misiniz?`)) {
+      try {
+        await deleteDoc(doc(db, "admins", userId));
+        showToast("Kullanıcı başarıyla silindi.", "success");
+        fetchSystemUsers();
+      } catch(err) {
+        console.error(err);
+        showToast("Kullanıcı silinirken hata oluştu.", "error");
+      }
+    }
+  };
+
   const handleUpdateDropdowns = async (newSettings: DropdownSettings) => {
     setDropdownSettings(newSettings);
     try {
@@ -2737,6 +2750,7 @@ export default function App() {
                                   <th className="px-4 py-3 border-b border-[#2b2d31]">Ad Soyad</th>
                                   <th className="px-4 py-3 border-b border-[#2b2d31]">E-Posta</th>
                                   <th className="px-4 py-3 border-b border-[#2b2d31]">Rol (Yetki)</th>
+                                  <th className="px-4 py-3 border-b border-[#2b2d31] w-20">İşlem</th>
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-[#2b2d31] bg-[#2b2d31]/50 text-sm">
@@ -2764,11 +2778,22 @@ export default function App() {
                                         </select>
                                       )}
                                     </td>
+                                    <td className="px-4 py-3 text-center">
+                                      {u.email !== 'onur.demirkaya@tp-link.com' && (
+                                        <button 
+                                          onClick={() => handleDeleteAdmin(u.id, u.email)}
+                                          title="Kullanıcıyı Sil"
+                                          className="text-red-400 hover:text-red-300 hover:bg-red-500/10 p-1.5 rounded transition-colors"
+                                        >
+                                          <Trash2 className="w-4 h-4" />
+                                        </button>
+                                      )}
+                                    </td>
                                   </tr>
                                 ))}
                                 {systemUsers.length === 0 && (
                                   <tr>
-                                    <td colSpan={3} className="px-4 py-8 text-center text-gray-500 text-xs">
+                                    <td colSpan={4} className="px-4 py-8 text-center text-gray-500 text-xs">
                                       Kullanıcı bilgisi yükleniyor veya bulunamadı.
                                     </td>
                                   </tr>
