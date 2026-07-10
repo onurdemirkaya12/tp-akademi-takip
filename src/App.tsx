@@ -423,6 +423,51 @@ export default function App() {
     }
   };
 
+  const handleDeleteExam = async (examName: string) => {
+    if (!window.confirm(`"${examName}" isimli sınavı ve ona ait tüm sonuçları sistemden kalıcı olarak silmek istediğinize emin misiniz?`)) return;
+
+    try {
+      setLoading(true);
+      const batch = writeBatch(db);
+      
+      // 1. Etkinliklerin içindeki sınavları temizle
+      const updatedEvents = events.map(e => {
+        if (e.exams?.some(ex => ex.name === examName)) {
+          const newExams = e.exams.filter(ex => ex.name !== examName);
+          batch.update(doc(db, "events", e.id), { exams: newExams });
+          return { ...e, exams: newExams };
+        }
+        return e;
+      });
+
+      // 2. Kullanıcıların içindeki examResults temizle
+      const updatedUsers = users.map(u => {
+        if (u.examResults?.some(r => r.exam.name === examName)) {
+          const newResults = u.examResults.filter(r => r.exam.name !== examName);
+          const updateData: any = { examResults: newResults };
+          
+          if (newResults.length === 0) {
+            updateData.examStatus = null;
+          }
+
+          batch.update(doc(db, "users", u.id), updateData);
+          return { ...u, ...updateData };
+        }
+        return u;
+      });
+
+      await batch.commit();
+      setEvents(updatedEvents);
+      setUsers(updatedUsers);
+      showToast(`"${examName}" başarıyla silindi.`, "success");
+    } catch (error) {
+      console.error("Sınav silinirken hata:", error);
+      showToast("Sınav silinirken bir hata oluştu.", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleDeleteInvitee = async (userId: string, eventId: string) => {
     if (!window.confirm("Bu davetli kaydını silmek istediğinize emin misiniz?")) return;
     try {
@@ -2125,15 +2170,24 @@ export default function App() {
                                   <span className="text-lg">{s.failed}</span>
                                 </div>
                               </div>
-                              <button 
-                                onClick={() => {
-                                  setCertificateExportFilters(prev => ({...prev, examType: s.name, examStatus: "Tümü"}));
+                              <div className="flex gap-2 mt-4">
+                                <button 
+                                  onClick={() => {
+                                    setCertificateExportFilters(prev => ({...prev, examType: s.name, examStatus: "Tümü"}));
                                   setIsCertificateExportModalOpen(true);
-                                }}
-                                className="w-full mt-4 bg-[#313338] hover:bg-[#36373d] border border-[#36373d] text-gray-300 hover:text-white font-bold text-xs py-2 rounded transition-colors flex justify-center items-center gap-2"
-                              >
-                                <FileSpreadsheet className="w-3.5 h-3.5" /> Bu Sınavı Raporla
-                              </button>
+                                  }}
+                                  className="flex-1 bg-[#313338] hover:bg-[#36373d] border border-[#36373d] text-gray-300 hover:text-white font-bold text-xs py-2 rounded transition-colors flex justify-center items-center gap-2"
+                                >
+                                  <FileSpreadsheet className="w-3.5 h-3.5" /> Raporla
+                                </button>
+                                <button 
+                                  onClick={() => handleDeleteExam(s.name)}
+                                  className="bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-400 font-bold text-xs px-3 py-2 rounded transition-colors flex justify-center items-center"
+                                  title="Sınavı Sil"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             </div>
                           ));
                         })()}
@@ -2568,73 +2622,111 @@ export default function App() {
                     <p className="text-xs text-gray-400 font-mono break-all">{selectedUser.email || "e-posta tanımsız"}</p>
                   </div>
 
-                  {/* Exam history list */}
-                  <div className="bg-[#313338] p-4 rounded-lg border border-[#36373d] space-y-3">
-                    <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">Eğitim & Sınav Geçmişi</p>
+                  {/* Eğitim & Sınav history list */}
+                  <div className="bg-[#313338] p-4 rounded-lg border border-[#36373d] space-y-4">
                     
-                    {!selectedUser.examResults || selectedUser.examResults.length === 0 ? (
-                      <div className="text-xs text-gray-500 py-2">
-                        Henüz sınav sonucu tanımlanmamış.
-                      </div>
-                    ) : (
-                      <div className="flex flex-col gap-3">
-                        {selectedUser.examResults.map((result) => (
-                          <div key={result.id} className="flex flex-col gap-1 pb-2 border-b border-[#1e1f22]/50 last:border-0 last:pb-0">
-                            <div className="flex justify-between items-center">
-                              <span className="text-xs font-semibold text-white">{result.exam?.name || "Eğitim Sınavı"}</span>
-                              
-                              {/* Passed / Failed indicators */}
-                              <span className={`text-[10px] px-2 py-0.5 rounded font-bold border ${
-                                result.status === "Geçti" 
-                                  ? "bg-green-500/10 text-green-400 border-green-500/20" 
-                                  : "bg-red-500/10 text-red-400 border-red-500/20"
-                              }`}>
-                                {result.status}
-                              </span>
+                    {/* Eğitim Geçmişi */}
+                    <div className="space-y-3">
+                      <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">Eğitim Geçmişi</p>
+                      
+                      {!selectedUser.attendances || selectedUser.attendances.length === 0 ? (
+                        <div className="text-xs text-gray-500 py-2">
+                          Henüz bir eğitime katılmamış veya davet edilmemiş.
+                        </div>
+                      ) : (
+                        <div className="flex flex-col gap-3">
+                          {selectedUser.attendances.map((att) => (
+                            <div key={att.id} className="flex flex-col gap-1 pb-2 border-b border-[#1e1f22]/50 last:border-0 last:pb-0">
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs font-semibold text-white">{att.event?.name || "Bilinmeyen Eğitim"}</span>
+                                
+                                <span className={`text-[10px] px-2 py-0.5 rounded font-bold border ${
+                                  (att.attendanceStatus === "Katıldı" || !att.attendanceStatus)
+                                    ? "bg-green-500/10 text-green-400 border-green-500/20" 
+                                    : att.attendanceStatus === "Davetli"
+                                      ? "bg-blue-500/10 text-blue-400 border-blue-500/20"
+                                      : "bg-red-500/10 text-red-400 border-red-500/20"
+                                }`}>
+                                  {att.attendanceStatus || "Katıldı"}
+                                </span>
+                              </div>
+                              {att.event?.date && <span className="text-[10px] text-gray-400">{new Date(att.event.date).toLocaleDateString("tr-TR")}</span>}
                             </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
 
-                            {/* Inline Edit score section */}
-                            <div className="flex justify-between items-center mt-1">
-                              {editingScoreId === result.id ? (
-                                <div className="flex items-center gap-1.5 mt-1">
-                                  <input 
-                                    type="number" 
-                                    value={editScoreValue}
-                                    onChange={(e) => setEditScoreValue(parseInt(e.target.value) || 0)}
-                                    className="bg-[#1e1f22] text-xs text-white px-2 py-1 rounded w-16 font-bold border border-[#5865f2] focus:outline-none"
-                                  />
-                                  <button 
-                                    onClick={() => saveScoreChange(result.exam.id)}
-                                    className="bg-[#5865f2] text-white px-2 py-1 rounded text-[10px] font-bold hover:bg-[#5865f2]/90"
-                                  >
-                                    Kaydet
-                                  </button>
-                                  <button 
-                                    onClick={() => setEditingScoreId(null)}
-                                    className="text-gray-500 hover:text-white text-[10px] px-1"
-                                  >
-                                    ✕
-                                  </button>
-                                </div>
-                              ) : (
-                                <>
-                                  <span className="text-[11px] text-gray-400">Puan: <strong className="text-white font-mono">{result.score}</strong></span>
-                                  <button 
-                                    onClick={() => {
-                                      setEditingScoreId(result.id);
-                                      setEditScoreValue(result.score);
-                                    }}
-                                    className="text-[10px] text-[#5865f2] hover:underline font-bold"
-                                  >
-                                    Notu Güncelle
-                                  </button>
-                                </>
-                              )}
+                    <div className="h-px bg-[#36373d]/50 w-full"></div>
+
+                    {/* Sınav Geçmişi */}
+                    <div className="space-y-3">
+                      <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">Sınav Geçmişi</p>
+                      
+                      {!selectedUser.examResults || selectedUser.examResults.length === 0 ? (
+                        <div className="text-xs text-gray-500 py-2">
+                          Henüz sınav sonucu tanımlanmamış.
+                        </div>
+                      ) : (
+                        <div className="flex flex-col gap-3">
+                          {selectedUser.examResults.map((result) => (
+                            <div key={result.id} className="flex flex-col gap-1 pb-2 border-b border-[#1e1f22]/50 last:border-0 last:pb-0">
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs font-semibold text-white">{result.exam?.name || "Eğitim Sınavı"}</span>
+                                
+                                {/* Passed / Failed indicators */}
+                                <span className={`text-[10px] px-2 py-0.5 rounded font-bold border ${
+                                  result.status === "Geçti" 
+                                    ? "bg-green-500/10 text-green-400 border-green-500/20" 
+                                    : "bg-red-500/10 text-red-400 border-red-500/20"
+                                }`}>
+                                  {result.status}
+                                </span>
+                              </div>
+
+                              {/* Inline Edit score section */}
+                              <div className="flex justify-between items-center mt-1">
+                                {editingScoreId === result.id ? (
+                                  <div className="flex items-center gap-1.5 mt-1">
+                                    <input 
+                                      type="number" 
+                                      value={editScoreValue}
+                                      onChange={(e) => setEditScoreValue(parseInt(e.target.value) || 0)}
+                                      className="bg-[#1e1f22] text-xs text-white px-2 py-1 rounded w-16 font-bold border border-[#5865f2] focus:outline-none"
+                                    />
+                                    <button 
+                                      onClick={() => saveScoreChange(result.exam.id)}
+                                      className="bg-[#5865f2] text-white px-2 py-1 rounded text-[10px] font-bold hover:bg-[#5865f2]/90"
+                                    >
+                                      Kaydet
+                                    </button>
+                                    <button 
+                                      onClick={() => setEditingScoreId(null)}
+                                      className="text-gray-500 hover:text-white text-[10px] px-1"
+                                    >
+                                      ✕
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <>
+                                    <span className="text-[11px] text-gray-400">Puan: <strong className="text-white font-mono">{result.score}</strong></span>
+                                    <button 
+                                      onClick={() => {
+                                        setEditingScoreId(result.id);
+                                        setEditScoreValue(result.score);
+                                      }}
+                                      className="text-[10px] text-[#5865f2] hover:underline font-bold"
+                                    >
+                                      Notu Güncelle
+                                    </button>
+                                  </>
+                                )}
+                              </div>
                             </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   {/* Add exam inline wizard */}
