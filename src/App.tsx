@@ -231,9 +231,12 @@ export default function App() {
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [selectedInviteeIds, setSelectedInviteeIds] = useState<string[]>([]);
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
+  const [inviteeSortConfig, setInviteeSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
 
   // Detail panel state
   const [selectedUser, setSelectedUser] = useState<UserData | null>(null);
+  const [isEditingUser, setIsEditingUser] = useState(false);
+  const [editedUserData, setEditedUserData] = useState<Partial<UserData>>({});
   const [selectedEvent, setSelectedEvent] = useState<EventData | null>(null);
   const [editingEventData, setEditingEventData] = useState<Partial<EventData> | null>(null);
   const [quickAddParticipant, setQuickAddParticipant] = useState({ firstName: "", lastName: "", email: "", phone: "" });
@@ -468,6 +471,29 @@ export default function App() {
     }
   };
 
+  const handleSaveUserEdit = async () => {
+    if (!selectedUser) return;
+    try {
+      const userRef = doc(db, "users", selectedUser.id);
+      
+      const cleanData: any = {};
+      Object.keys(editedUserData).forEach(key => {
+        const val = editedUserData[key as keyof UserData];
+        cleanData[key] = val === undefined ? "" : val;
+      });
+
+      await setDoc(userRef, cleanData, { merge: true });
+      const updatedUser = { ...selectedUser, ...cleanData };
+      setSelectedUser(updatedUser as UserData);
+      setUsers(users.map(u => u.id === selectedUser.id ? updatedUser as UserData : u));
+      setIsEditingUser(false);
+      showToast("Kullanıcı bilgileri güncellendi.", "success");
+    } catch (error) {
+      console.error("Kullanıcı güncellenirken hata:", error);
+      showToast("Kullanıcı güncellenirken bir hata oluştu.", "error");
+    }
+  };
+
   const handleDeleteInvitee = async (userId: string, eventId: string) => {
     if (!window.confirm("Bu davetli kaydını silmek istediğinize emin misiniz?")) return;
     try {
@@ -534,6 +560,14 @@ export default function App() {
       direction = 'desc';
     }
     setSortConfig({ key, direction });
+  };
+
+  const handleInviteeSort = (key: string) => {
+    let direction: 'asc' | 'desc' = 'asc';
+    if (inviteeSortConfig && inviteeSortConfig.key === key && inviteeSortConfig.direction === 'asc') {
+      direction = 'desc';
+    }
+    setInviteeSortConfig({ key, direction });
   };
 
   const sortedUsers = React.useMemo(() => {
@@ -607,8 +641,35 @@ export default function App() {
       result = result.filter(item => item.attendance.attendanceStatus === inviteeStatusFilter);
     }
 
+    if (inviteeSortConfig !== null) {
+      result.sort((a, b) => {
+        let aValue = "";
+        let bValue = "";
+        if (inviteeSortConfig.key === "name") {
+          aValue = `${a.user.firstName} ${a.user.lastName}`.toLowerCase();
+          bValue = `${b.user.firstName} ${b.user.lastName}`.toLowerCase();
+        } else if (inviteeSortConfig.key === "email") {
+          aValue = (a.user.email || "").toLowerCase();
+          bValue = (b.user.email || "").toLowerCase();
+        } else if (inviteeSortConfig.key === "company") {
+          aValue = (a.user.company || "").toLowerCase();
+          bValue = (b.user.company || "").toLowerCase();
+        } else if (inviteeSortConfig.key === "event") {
+          aValue = (a.attendance.event.name || "").toLowerCase();
+          bValue = (b.attendance.event.name || "").toLowerCase();
+        } else if (inviteeSortConfig.key === "status") {
+          aValue = (a.attendance.attendanceStatus || "").toLowerCase();
+          bValue = (b.attendance.attendanceStatus || "").toLowerCase();
+        }
+        
+        if (aValue < bValue) return inviteeSortConfig.direction === 'asc' ? -1 : 1;
+        if (aValue > bValue) return inviteeSortConfig.direction === 'asc' ? 1 : -1;
+        return 0;
+      });
+    }
+
     return result;
-  }, [users, inviteeSearchTerm, inviteeEventFilter, inviteeStatusFilter]);
+  }, [users, inviteeSearchTerm, inviteeEventFilter, inviteeStatusFilter, inviteeSortConfig]);
 
   // Drag & drop handlers
   const handleDrag = (e: React.DragEvent) => {
@@ -889,12 +950,22 @@ export default function App() {
           }
 
           let updatedData: any = {
-            firstName, lastName, email, phone,
+            firstName: existingUser?.firstName || firstName,
+            lastName: existingUser?.lastName || lastName,
+            email: existingUser?.email || email,
             attendances: updatedAttendances
           };
 
-          if (company && (!existingUser || existingUser.company !== company)) {
-            updatedData.company = company;
+          if (existingUser?.phone) {
+            updatedData.phone = existingUser.phone; // Koru
+          } else if (phone) {
+            updatedData.phone = phone; // Excel'den al
+          }
+
+          if (existingUser?.company) {
+            updatedData.company = existingUser.company; // Koru
+          } else if (company) {
+            updatedData.company = company; // Excel'den al
           }
 
           const userRef = doc(db, "users", userId);
@@ -1044,6 +1115,34 @@ export default function App() {
     } catch (error) {
       console.error("Failed to update score:", error);
     }
+  };
+
+  const handleExportInviteesExcel = () => {
+    const dataToExport = selectedInviteeIds.length > 0 
+      ? inviteesData.filter(d => selectedInviteeIds.includes(`${d.user.id}-${d.attendance.event.id}`))
+      : inviteesData;
+
+    if (dataToExport.length === 0) {
+      showToast("Dışa aktarılacak veri bulunamadı.", "error");
+      return;
+    }
+
+    const exportData = dataToExport.map(d => ({
+      "Adı": d.user.firstName,
+      "Soyadı": d.user.lastName,
+      "Email": d.user.email,
+      "Telefon": d.user.phone || "",
+      "Firma Bilgisi": d.user.company || "",
+      "Etkinlik Adı": d.attendance.event.name,
+      "Etkinlik Tarihi": new Date(d.attendance.event.date).toLocaleDateString("tr-TR"),
+      "Katılım Durumu": d.attendance.attendanceStatus || "Katıldı"
+    }));
+
+    const ws = utils.json_to_sheet(exportData);
+    const wb = utils.book_new();
+    utils.book_append_sheet(wb, ws, "Davetli Listesi");
+    writeFile(wb, "Davetli_Listesi.xlsx");
+    showToast("Davetli listesi Excel olarak dışa aktarıldı.", "success");
   };
 
   // Export Data to Excel
@@ -1706,7 +1805,7 @@ export default function App() {
                 <div className="bg-[#313338] rounded-lg flex flex-col anti-gravity overflow-hidden border border-[#36373d]/40">
                   <div className="p-5 border-b border-[#1e1f22] bg-[#2b2d31]/30 flex justify-between items-center flex-wrap gap-4">
                     <div>
-                      <h3 className="text-white font-bold text-base">Davetli ve Katılımcı Listesi</h3>
+                      <h3 className="text-white font-bold text-base">Davetli ve Katılımcı Listesi ({inviteesData.length} Kişi)</h3>
                       <p className="text-xs text-gray-500">Etkinliklere davet edilen kişileri ve katılım durumlarını buradan takip edebilirsiniz.</p>
                     </div>
                     <div className="flex gap-4 items-center">
@@ -1747,6 +1846,13 @@ export default function App() {
                           <Trash2 className="w-3.5 h-3.5" /> Seçili {selectedInviteeIds.length} Kaydı Sil
                         </button>
                       )}
+                      <button 
+                        onClick={handleExportInviteesExcel}
+                        className="bg-green-600 text-white hover:bg-green-700 px-3 py-1.5 rounded font-bold text-xs transition-all flex items-center gap-1.5 shadow-lg shadow-green-600/20"
+                      >
+                        <FileSpreadsheet className="w-3.5 h-3.5" /> 
+                        {selectedInviteeIds.length > 0 ? "Seçilileri Aktar" : "Dışa Aktar"}
+                      </button>
                     </div>
                   </div>
 
@@ -1783,11 +1889,21 @@ export default function App() {
                                 }}
                               />
                             </th>
-                            <th className="px-6 py-4">Katılımcı / Davetli</th>
-                            <th className="px-6 py-4">E-Posta</th>
-                            <th className="px-6 py-4">Kurum / Şube</th>
-                            <th className="px-6 py-4">Etkinlik</th>
-                            <th className="px-6 py-4">Durum</th>
+                            <th className="px-6 py-4 cursor-pointer hover:text-white transition-colors" onClick={() => handleInviteeSort('name')}>
+                              <div className="flex items-center gap-1">Katılımcı / Davetli <ArrowUpDown className="w-3 h-3" /></div>
+                            </th>
+                            <th className="px-6 py-4 cursor-pointer hover:text-white transition-colors" onClick={() => handleInviteeSort('email')}>
+                              <div className="flex items-center gap-1">E-Posta <ArrowUpDown className="w-3 h-3" /></div>
+                            </th>
+                            <th className="px-6 py-4 cursor-pointer hover:text-white transition-colors" onClick={() => handleInviteeSort('company')}>
+                              <div className="flex items-center gap-1">Kurum / Şube <ArrowUpDown className="w-3 h-3" /></div>
+                            </th>
+                            <th className="px-6 py-4 cursor-pointer hover:text-white transition-colors" onClick={() => handleInviteeSort('event')}>
+                              <div className="flex items-center gap-1">Etkinlik <ArrowUpDown className="w-3 h-3" /></div>
+                            </th>
+                            <th className="px-6 py-4 cursor-pointer hover:text-white transition-colors" onClick={() => handleInviteeSort('status')}>
+                              <div className="flex items-center gap-1">Durum <ArrowUpDown className="w-3 h-3" /></div>
+                            </th>
                             <th className="px-6 py-4 text-right">İşlem</th>
                           </tr>
                         </thead>
@@ -2574,7 +2690,7 @@ export default function App() {
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 0.5 }}
                 exit={{ opacity: 0 }}
-                onClick={() => setSelectedUser(null)}
+                onClick={() => { setSelectedUser(null); setIsEditingUser(false); setEditedUserData({}); }}
                 className="absolute inset-0 bg-black/60 z-40"
               />
 
@@ -2594,7 +2710,7 @@ export default function App() {
                     Detay Paneli
                   </h2>
                   <button 
-                    onClick={() => setSelectedUser(null)}
+                    onClick={() => { setSelectedUser(null); setIsEditingUser(false); setEditedUserData({}); }}
                     className="text-gray-500 hover:text-white hover:bg-[#36373d] p-1.5 rounded-md transition-colors"
                   >
                     ✕
@@ -2605,22 +2721,74 @@ export default function App() {
                 <div className="flex-1 p-6 overflow-y-auto space-y-6">
                   
                   {/* User Avatar Summary */}
-                  <div className="flex flex-col items-center gap-3 py-2">
-                    <div className="w-20 h-20 rounded-full bg-[#5865f2] flex items-center justify-center text-white text-3xl font-bold shadow-lg shadow-[#5865f2]/20 border-2 border-[#5865f2]/40">
-                      {`${selectedUser.firstName?.[0] || ""}${selectedUser.lastName?.[0] || ""}`.toUpperCase()}
+                  {isEditingUser ? (
+                    <div className="bg-[#313338] p-4 rounded-lg border border-[#5865f2] space-y-4">
+                      <div className="flex justify-between items-center mb-2">
+                        <p className="text-[10px] font-bold text-[#5865f2] uppercase tracking-wide">Profili Düzenle</p>
+                        <div className="flex gap-2">
+                          <button onClick={() => setIsEditingUser(false)} className="text-xs text-gray-400 hover:text-white">İptal</button>
+                          <button onClick={handleSaveUserEdit} className="bg-[#5865f2] text-white text-xs px-3 py-1 rounded font-bold hover:bg-[#5865f2]/90">Kaydet</button>
+                        </div>
+                      </div>
+                      <div className="space-y-3">
+                        <div>
+                          <label className="text-xs text-gray-400 font-bold">Ad</label>
+                          <input type="text" value={editedUserData.firstName || ''} onChange={e => setEditedUserData({...editedUserData, firstName: e.target.value})} className="w-full mt-1 bg-[#1e1f22] border border-[#36373d] text-white text-sm rounded px-3 py-2 focus:outline-none focus:border-[#5865f2]" />
+                        </div>
+                        <div>
+                          <label className="text-xs text-gray-400 font-bold">Soyad</label>
+                          <input type="text" value={editedUserData.lastName || ''} onChange={e => setEditedUserData({...editedUserData, lastName: e.target.value})} className="w-full mt-1 bg-[#1e1f22] border border-[#36373d] text-white text-sm rounded px-3 py-2 focus:outline-none focus:border-[#5865f2]" />
+                        </div>
+                        <div>
+                          <label className="text-xs text-gray-400 font-bold">E-posta</label>
+                          <input type="email" value={editedUserData.email || ''} onChange={e => setEditedUserData({...editedUserData, email: e.target.value})} className="w-full mt-1 bg-[#1e1f22] border border-[#36373d] text-white text-sm rounded px-3 py-2 focus:outline-none focus:border-[#5865f2]" />
+                        </div>
+                        <div>
+                          <label className="text-xs text-gray-400 font-bold">Telefon</label>
+                          <input type="text" value={editedUserData.phone || ''} onChange={e => setEditedUserData({...editedUserData, phone: e.target.value})} className="w-full mt-1 bg-[#1e1f22] border border-[#36373d] text-white text-sm rounded px-3 py-2 focus:outline-none focus:border-[#5865f2]" />
+                        </div>
+                        <div>
+                          <label className="text-xs text-gray-400 font-bold">Firma / Kurum</label>
+                          <input type="text" value={editedUserData.company || ''} onChange={e => setEditedUserData({...editedUserData, company: e.target.value})} className="w-full mt-1 bg-[#1e1f22] border border-[#36373d] text-white text-sm rounded px-3 py-2 focus:outline-none focus:border-[#5865f2]" />
+                        </div>
+                      </div>
                     </div>
-                    <div className="text-center">
-                      <h3 className="text-white text-xl font-bold">{selectedUser.firstName} {selectedUser.lastName}</h3>
-                      <p className="text-sm text-gray-500">{selectedUser.company || "Serbest Kurum"}</p>
-                    </div>
-                  </div>
+                  ) : (
+                    <>
+                      <div className="flex flex-col items-center gap-3 py-2 relative">
+                        <button 
+                          onClick={() => {
+                            setEditedUserData({
+                              firstName: selectedUser.firstName,
+                              lastName: selectedUser.lastName,
+                              email: selectedUser.email,
+                              phone: selectedUser.phone,
+                              company: selectedUser.company
+                            });
+                            setIsEditingUser(true);
+                          }}
+                          className="absolute top-0 right-0 text-gray-400 hover:text-white bg-[#313338] hover:bg-[#36373d] p-1.5 rounded transition-colors border border-[#36373d]"
+                          title="Profili Düzenle"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>
+                        </button>
+                        <div className="w-20 h-20 rounded-full bg-[#5865f2] flex items-center justify-center text-white text-3xl font-bold shadow-lg shadow-[#5865f2]/20 border-2 border-[#5865f2]/40">
+                          {`${selectedUser.firstName?.[0] || ""}${selectedUser.lastName?.[0] || ""}`.toUpperCase()}
+                        </div>
+                        <div className="text-center">
+                          <h3 className="text-white text-xl font-bold">{selectedUser.firstName} {selectedUser.lastName}</h3>
+                          <p className="text-sm text-gray-500">{selectedUser.company || "Serbest Kurum"}</p>
+                        </div>
+                      </div>
 
-                  {/* Communication block */}
-                  <div className="bg-[#313338] p-4 rounded-lg border border-[#36373d] space-y-2">
-                    <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">İletişim Bilgileri</p>
-                    <p className="text-sm text-white font-semibold font-mono">{selectedUser.phone || "+90 532 000 00 00"}</p>
-                    <p className="text-xs text-gray-400 font-mono break-all">{selectedUser.email || "e-posta tanımsız"}</p>
-                  </div>
+                      {/* Communication block */}
+                      <div className="bg-[#313338] p-4 rounded-lg border border-[#36373d] space-y-2">
+                        <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">İletişim Bilgileri</p>
+                        <p className="text-sm text-white font-semibold font-mono">{selectedUser.phone || "+90 532 000 00 00"}</p>
+                        <p className="text-xs text-gray-400 font-mono break-all">{selectedUser.email || "e-posta tanımsız"}</p>
+                      </div>
+                    </>
+                  )}
 
                   {/* Eğitim & Sınav history list */}
                   <div className="bg-[#313338] p-4 rounded-lg border border-[#36373d] space-y-4">
