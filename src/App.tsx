@@ -266,6 +266,7 @@ export default function App() {
   // Event Form Modal State
   const [isEventModalOpen, setIsEventModalOpen] = useState(false);
   const [eventFormData, setEventFormData] = useState({
+    name: "",
     eventType: "",
     date: "",
     trainer: "",
@@ -952,7 +953,7 @@ export default function App() {
       };
 
       if (uploadType === "event" || uploadType === "invitee") {
-        const generatedEventName = targetEventForUpload ? targetEventForUpload.name : (eventFormData.content || eventFormData.eventType || "Genel Eğitim");
+        const generatedEventName = targetEventForUpload ? targetEventForUpload.name : (eventFormData.name || eventFormData.content || eventFormData.eventType || "Genel Eğitim");
         const eventDate = targetEventForUpload && targetEventForUpload.date ? targetEventForUpload.date.split("T")[0] : (eventFormData.date ? eventFormData.date.split("T")[0] : "NoDate");
         const eventId = targetEventForUpload ? targetEventForUpload.id : `${generatedEventName.replace(/[^a-zA-Z0-9]/g, "")}-${eventDate}`;
         const attendanceStatus = uploadType === "invitee" ? "Davetli" : "Katıldı";
@@ -3108,32 +3109,36 @@ export default function App() {
               
               <div className="p-6 overflow-y-auto max-h-[70vh] space-y-6">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="md:col-span-2 space-y-1.5">
+                    <label className="text-xs font-bold text-gray-400">Etkinlik Adı</label>
+                    <input 
+                      type="text" 
+                      placeholder="Örn: 2024 Liderlik Zirvesi"
+                      value={eventFormData.name} 
+                      onChange={e => setEventFormData({...eventFormData, name: e.target.value})}
+                      className="w-full bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
+                    />
+                  </div>
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-gray-400">Etkinlik Türü <span className="text-red-400">*</span></label>
-                    <div className="flex gap-2">
-                      <select 
-                        value={eventFormData.eventType} onChange={e => setEventFormData({...eventFormData, eventType: e.target.value})}
-                        className="flex-1 bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
-                      >
-                        <option value="">Lütfen Seçiniz</option>
-                        {dropdownSettings.eventTypes.map((t, i) => <option key={i} value={t}>{t}</option>)}
-                      </select>
-                      <button className="bg-[#2b2d31] border border-[#1e1f22] rounded-md p-2 text-gray-400 hover:text-white"><RefreshCw className="w-4 h-4" /></button>
-                    </div>
+                    <select 
+                      value={eventFormData.eventType} onChange={e => setEventFormData({...eventFormData, eventType: e.target.value})}
+                      className="w-full bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
+                    >
+                      <option value="">Lütfen Seçiniz</option>
+                      {dropdownSettings.eventTypes.map((t, i) => <option key={i} value={t}>{t}</option>)}
+                    </select>
                   </div>
 
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-gray-400">Eğitmen <span className="text-red-400">*</span></label>
-                    <div className="flex gap-2">
-                      <select 
-                        value={eventFormData.trainer} onChange={e => setEventFormData({...eventFormData, trainer: e.target.value})}
-                        className="flex-1 bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
-                      >
-                        <option value="">Lütfen Seçiniz</option>
-                        {dropdownSettings.trainers.map((t, i) => <option key={i} value={t}>{t}</option>)}
-                      </select>
-                      <button className="bg-[#2b2d31] border border-[#1e1f22] rounded-md p-2 text-gray-400 hover:text-white"><RefreshCw className="w-4 h-4" /></button>
-                    </div>
+                    <select 
+                      value={eventFormData.trainer} onChange={e => setEventFormData({...eventFormData, trainer: e.target.value})}
+                      className="w-full bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
+                    >
+                      <option value="">Lütfen Seçiniz</option>
+                      {dropdownSettings.trainers.map((t, i) => <option key={i} value={t}>{t}</option>)}
+                    </select>
                   </div>
 
                   <div className="space-y-1.5">
@@ -3147,30 +3152,24 @@ export default function App() {
 
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-gray-400">Eğitim Amacı <span className="text-red-400">*</span></label>
-                    <div className="flex gap-2">
-                      <select 
-                        value={eventFormData.purpose} onChange={e => setEventFormData({...eventFormData, purpose: e.target.value})}
-                        className="flex-1 bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
-                      >
-                        <option value="">Lütfen Seçiniz</option>
-                        {dropdownSettings.purposes.map((p, i) => <option key={i} value={p}>{p}</option>)}
-                      </select>
-                      <button className="bg-[#2b2d31] border border-[#1e1f22] rounded-md p-2 text-gray-400 hover:text-white"><RefreshCw className="w-4 h-4" /></button>
-                    </div>
+                    <select 
+                      value={eventFormData.purpose} onChange={e => setEventFormData({...eventFormData, purpose: e.target.value})}
+                      className="w-full bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
+                    >
+                      <option value="">Lütfen Seçiniz</option>
+                      {dropdownSettings.purposes.map((p, i) => <option key={i} value={p}>{p}</option>)}
+                    </select>
                   </div>
 
                   <div className="space-y-1.5">
                     <label className="text-xs font-bold text-gray-400">Eğitim İçeriği <span className="text-red-400">*</span></label>
-                    <div className="flex gap-2">
-                      <select 
-                        value={eventFormData.content} onChange={e => setEventFormData({...eventFormData, content: e.target.value})}
-                        className="flex-1 bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
-                      >
-                        <option value="">Lütfen Seçiniz</option>
-                        {dropdownSettings.contents.map((c, i) => <option key={i} value={c}>{c}</option>)}
-                      </select>
-                      <button className="bg-[#2b2d31] border border-[#1e1f22] rounded-md p-2 text-gray-400 hover:text-white"><RefreshCw className="w-4 h-4" /></button>
-                    </div>
+                    <select 
+                      value={eventFormData.content} onChange={e => setEventFormData({...eventFormData, content: e.target.value})}
+                      className="w-full bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-2 text-sm text-white focus:border-[#5865f2] focus:outline-none"
+                    >
+                      <option value="">Lütfen Seçiniz</option>
+                      {dropdownSettings.contents.map((c, i) => <option key={i} value={c}>{c}</option>)}
+                    </select>
                   </div>
                 </div>
 
