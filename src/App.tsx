@@ -40,7 +40,7 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip,
 import { read, utils, writeFile } from "xlsx";
 import { db, auth } from "./firebase";
 import { collection, getDocs, getDoc, doc, setDoc, writeBatch, arrayUnion, deleteDoc } from "firebase/firestore";
-import { onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from "firebase/auth";
+import { onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, sendEmailVerification } from "firebase/auth";
 
 type TabType = "dashboard" | "invitees" | "participants" | "events" | "exams" | "upload" | "settings";
 
@@ -122,18 +122,34 @@ const AuthScreen = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    
+    if (!isLogin && !email.toLowerCase().endsWith("@tp-link.com")) {
+      setError("Sadece @tp-link.com uzantılı e-posta adresleri kayıt olabilir.");
+      return;
+    }
+
     setLoading(true);
 
     try {
       if (isLogin) {
-        await signInWithEmailAndPassword(auth, email, password);
+        const userCredential = await signInWithEmailAndPassword(auth, email, password);
+        if (!userCredential.user.emailVerified) {
+          await signOut(auth);
+          setError("Lütfen hesabınıza giriş yapabilmek için mailinize gönderilen doğrulama bağlantısına tıklayın.");
+          return;
+        }
       } else {
         const userCredential = await createUserWithEmailAndPassword(auth, email, password);
         await setDoc(doc(db, "admins", userCredential.user.uid), {
           firstName,
           lastName,
-          email
+          email,
+          role: "viewer"
         });
+        await sendEmailVerification(userCredential.user);
+        await signOut(auth);
+        setIsLogin(true);
+        alert("Kayıt başarılı! Lütfen hesabınızı onaylamak için e-postanıza gönderilen bağlantıya tıklayın.");
       }
     } catch (err: any) {
       setError(err.message || "Bir hata oluştu.");
@@ -180,6 +196,8 @@ const AuthScreen = () => {
             <input required minLength={6} type="password" value={password} onChange={e => setPassword(e.target.value)} className="w-full bg-[#1e1f22] border border-[#1e1f22] rounded px-3 py-2 text-white focus:outline-none focus:border-[#5865f2] transition-colors" />
           </div>
 
+
+
           <button disabled={loading} type="submit" className="w-full bg-[#5865f2] hover:bg-[#4752c4] text-white font-bold py-2.5 rounded transition-colors mt-6 disabled:opacity-50">
             {loading ? "Bekleniyor..." : (isLogin ? "Giriş Yap" : "Kayıt Ol")}
           </button>
@@ -207,9 +225,10 @@ export default function App() {
         const docRef = doc(db, "admins", user.uid);
         const docSnap = await getDoc(docRef);
         if (docSnap.exists()) {
-          setCurrentUser({ uid: user.uid, email: user.email, ...docSnap.data() });
+          const data = docSnap.data();
+          setCurrentUser({ uid: user.uid, email: user.email, role: data.role || "admin", ...data });
         } else {
-          setCurrentUser({ uid: user.uid, email: user.email, firstName: "Yönetici", lastName: "" });
+          setCurrentUser({ uid: user.uid, email: user.email, firstName: "Yönetici", lastName: "", role: "admin" });
         }
       } else {
         setCurrentUser(null);
@@ -220,6 +239,7 @@ export default function App() {
   }, []);
 
   // Invitees tab specific state
+  const [systemUsers, setSystemUsers] = useState<any[]>([]);
   const [inviteeSearchTerm, setInviteeSearchTerm] = useState("");
   const [inviteeEventFilter, setInviteeEventFilter] = useState("all");
   const [inviteeStatusFilter, setInviteeStatusFilter] = useState("all");
@@ -352,6 +372,36 @@ export default function App() {
   useEffect(() => {
     fetchData();
   }, [activeTab]);
+
+  const fetchSystemUsers = async () => {
+    if (currentUser?.email === 'onur.demirkaya@tp-link.com') {
+      try {
+        const adminsCol = collection(db, "admins");
+        const adminsSnap = await getDocs(adminsCol);
+        const data = adminsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+        setSystemUsers(data);
+      } catch(err) {
+        console.error("Error fetching system users", err);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === "profile") {
+      fetchSystemUsers();
+    }
+  }, [activeTab, currentUser]);
+
+  const handleRoleChange = async (userId: string, newRole: string) => {
+    try {
+      await setDoc(doc(db, "admins", userId), { role: newRole }, { merge: true });
+      showToast("Yetki başarıyla güncellendi.", "success");
+      fetchSystemUsers();
+    } catch(err) {
+      console.error(err);
+      showToast("Yetki güncellenirken hata oluştu.", "error");
+    }
+  };
 
   const handleUpdateDropdowns = async (newSettings: DropdownSettings) => {
     setDropdownSettings(newSettings);
@@ -1561,54 +1611,64 @@ export default function App() {
             <span>Sınavlar</span>
           </button>
 
-          <div className="pt-4">
-            <div className="text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-2 px-3">
-              Veri İşlemleri
+          {currentUser?.role === 'admin' && (
+            <div className="pt-4">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-2 px-3">
+                Veri İşlemleri
+              </div>
+              <button
+                onClick={() => setActiveTab("upload")}
+                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 group ${
+                  activeTab === "upload" 
+                    ? "active-nav font-semibold" 
+                    : "text-[#b5bac1] discord-hover"
+                }`}
+              >
+                <UploadCloud className="w-4 h-4 text-[#80848e] group-hover:text-white transition-colors" />
+                <span className="flex items-center justify-between w-full">
+                  <span>Excel Yükle</span>
+                  <span className="text-[9px] bg-[#5865f2] px-1.5 py-0.5 rounded text-white font-bold">XLSX</span>
+                </span>
+              </button>
+              <button
+                onClick={() => setActiveTab("settings")}
+                className={`w-full flex items-center gap-3 px-3 py-2 mt-1 rounded-lg text-sm font-medium transition-all duration-200 group ${
+                  activeTab === "settings" 
+                    ? "active-nav font-semibold" 
+                    : "text-[#b5bac1] discord-hover"
+                }`}
+              >
+                <Sliders className="w-4 h-4 text-[#80848e] group-hover:text-white transition-colors" />
+                <span>Seçenek Yönetimi</span>
+              </button>
             </div>
-            <button
-              onClick={() => setActiveTab("upload")}
-              className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 group ${
-                activeTab === "upload" 
-                  ? "active-nav font-semibold" 
-                  : "text-[#b5bac1] discord-hover"
-              }`}
-            >
-              <UploadCloud className="w-4 h-4 text-[#80848e] group-hover:text-white transition-colors" />
-              <span className="flex items-center justify-between w-full">
-                <span>Excel Yükle</span>
-                <span className="text-[9px] bg-[#5865f2] px-1.5 py-0.5 rounded text-white font-bold">XLSX</span>
-              </span>
-            </button>
-            <button
-              onClick={() => setActiveTab("settings")}
-              className={`w-full flex items-center gap-3 px-3 py-2 mt-1 rounded-lg text-sm font-medium transition-all duration-200 group ${
-                activeTab === "settings" 
-                  ? "active-nav font-semibold" 
-                  : "text-[#b5bac1] discord-hover"
-              }`}
-            >
-              <Sliders className="w-4 h-4 text-[#80848e] group-hover:text-white transition-colors" />
-              <span>Seçenek Yönetimi</span>
-            </button>
-          </div>
+          )}
         </nav>
 
         {/* User Card from Sleek Interface template */}
-        <div className="mt-auto p-4 bg-[#313338] mx-3 mb-6 rounded-lg flex items-center gap-3 border border-[#1e1f22] shadow-md hover:border-[#5865f2]/20 transition-all duration-300">
-          <div className="w-10 h-10 rounded-full bg-[#5865f2]/20 border border-[#5865f2]/30 flex items-center justify-center text-[#5865f2] font-bold text-sm">
+        <div className="mt-auto p-4 border-t border-[#1e1f22] bg-[#2b2d31] flex items-center gap-3">
+          <div 
+            onClick={() => setActiveTab("profile")} 
+            className="w-10 h-10 rounded-full bg-[#5865f2]/20 border border-[#5865f2]/30 flex items-center justify-center text-[#5865f2] font-bold text-sm cursor-pointer hover:bg-[#5865f2]/30 transition-colors"
+          >
             {currentUser?.firstName?.charAt(0) || "Y"}{currentUser?.lastName?.charAt(0) || ""}
           </div>
-          <div className="overflow-hidden flex-1">
-            <p className="text-xs font-bold text-white truncate">{currentUser?.firstName} {currentUser?.lastName}</p>
+          <div 
+            onClick={() => setActiveTab("profile")} 
+            className="overflow-hidden flex-1 cursor-pointer group"
+          >
+            <p className="text-xs font-bold text-white truncate group-hover:underline">{currentUser?.firstName} {currentUser?.lastName}</p>
             <p className="text-[10px] text-[#b5bac1] truncate">{currentUser?.email}</p>
           </div>
           <div className="flex gap-1">
             <button onClick={() => signOut(auth)} title="Çıkış Yap" className="p-1 rounded text-red-400 hover:text-red-300 hover:bg-[#36373d] transition-all">
               <LogOut className="w-3.5 h-3.5" />
             </button>
-            <button onClick={() => setActiveTab("settings")} title="Ayarlar" className="p-1 rounded text-[#b5bac1] hover:text-white hover:bg-[#36373d] transition-all">
-              <Settings className="w-3.5 h-3.5" />
-            </button>
+            {currentUser?.role === 'admin' && (
+              <button onClick={() => setActiveTab("settings")} title="Ayarlar" className="p-1 rounded text-[#b5bac1] hover:text-white hover:bg-[#36373d] transition-all">
+                <Settings className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
         </div>
 
@@ -1649,12 +1709,14 @@ export default function App() {
           </div>
           
           <div className="flex items-center gap-4">
-            <button 
-              onClick={() => { setActiveTab("upload"); }}
-              className="bg-[#5865f2] text-white px-4 py-2 rounded-md text-sm font-bold flex items-center gap-2 anti-gravity hover:shadow-lg hover:shadow-[#5865f2]/20"
-            >
-              <Plus className="w-4 h-4" /> Yeni Katılımcı / Excel
-            </button>
+            {currentUser?.role === 'admin' && (
+              <button 
+                onClick={() => { setActiveTab("upload"); }}
+                className="bg-[#5865f2] text-white px-4 py-2 rounded-md text-sm font-bold flex items-center gap-2 anti-gravity hover:shadow-lg hover:shadow-[#5865f2]/20"
+              >
+                <Plus className="w-4 h-4" /> Yeni Katılımcı / Excel
+              </button>
+            )}
           </div>
         </header>
 
@@ -1905,7 +1967,7 @@ export default function App() {
                           <option key={i} value={company}>{company}</option>
                         ))}
                       </select>
-                      {selectedInviteeIds.length > 0 && (
+                      {selectedInviteeIds.length > 0 && currentUser?.role === 'admin' && (
                         <button 
                           onClick={handleBulkDeleteInvitees}
                           className="bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white px-3 py-1.5 rounded border border-red-500/20 font-bold text-xs transition-all flex items-center gap-1.5"
@@ -2020,13 +2082,15 @@ export default function App() {
                                 </td>
                                 <td className="px-6 py-4 text-right">
                                   <div className="flex items-center justify-end gap-3">
-                                    <button 
-                                      onClick={(e) => { e.stopPropagation(); handleDeleteInvitee(user.id, attendance.event.id); }}
-                                      className="text-gray-500 hover:text-red-400 font-semibold text-xs transition-colors flex items-center p-1 rounded hover:bg-red-500/10"
-                                      title="Kaydı Sil"
-                                    >
-                                      <Trash2 className="w-4 h-4" />
-                                    </button>
+                                    {currentUser?.role === 'admin' && (
+                                      <button 
+                                        onClick={(e) => { e.stopPropagation(); handleDeleteInvitee(user.id, attendance.event.id); }}
+                                        className="text-gray-500 hover:text-red-400 font-semibold text-xs transition-colors flex items-center p-1 rounded hover:bg-red-500/10"
+                                        title="Kaydı Sil"
+                                      >
+                                        <Trash2 className="w-4 h-4" />
+                                      </button>
+                                    )}
                                   </div>
                                 </td>
                               </tr>
@@ -2090,7 +2154,7 @@ export default function App() {
                           <option key={i} value={company}>{company}</option>
                         ))}
                       </select>
-                      {selectedUserIds.length > 0 && (
+                      {selectedUserIds.length > 0 && currentUser?.role === 'admin' && (
                         <button 
                           onClick={handleBulkDeleteUsers}
                           className="bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white px-3 py-1.5 rounded border border-red-500/20 font-bold text-xs transition-all flex items-center gap-1.5"
@@ -2123,12 +2187,14 @@ export default function App() {
                           Arama terimiyle eşleşen sonuç yok veya sisteme henüz veri yüklenmemiş.
                         </p>
                       </div>
-                      <button 
-                        onClick={() => setActiveTab("upload")}
-                        className="bg-[#5865f2] text-white text-xs font-bold px-5 py-2.5 rounded-lg hover:bg-[#5865f2]/90 transition-all shadow-md shadow-[#5865f2]/20"
-                      >
-                        Excel ile Toplu Yükle
-                      </button>
+                      {currentUser?.role === 'admin' && (
+                        <button 
+                          onClick={() => setActiveTab("upload")}
+                          className="bg-[#5865f2] text-white text-xs font-bold px-5 py-2.5 rounded-lg hover:bg-[#5865f2]/90 transition-all shadow-md shadow-[#5865f2]/20"
+                        >
+                          Excel ile Toplu Yükle
+                        </button>
+                      )}
                     </div>
                   ) : (
                     <div className="overflow-x-auto">
@@ -2230,13 +2296,15 @@ export default function App() {
                                 <td className="px-6 py-4">{statusBadge}</td>
                                 <td className="px-6 py-4 text-right">
                                   <div className="flex items-center justify-end gap-3">
-                                    <button 
-                                      onClick={(e) => { e.stopPropagation(); handleDeleteUser(user.id); }}
-                                      className="text-gray-500 hover:text-red-400 font-semibold text-xs transition-colors flex items-center p-1 rounded hover:bg-red-500/10"
-                                      title="Kullanıcıyı Sil"
-                                    >
-                                      <Trash2 className="w-4 h-4" />
-                                    </button>
+                                    {currentUser?.role === 'admin' && (
+                                      <button 
+                                        onClick={(e) => { e.stopPropagation(); handleDeleteUser(user.id); }}
+                                        className="text-gray-500 hover:text-red-400 font-semibold text-xs transition-colors flex items-center p-1 rounded hover:bg-red-500/10"
+                                        title="Kullanıcıyı Sil"
+                                      >
+                                        <Trash2 className="w-4 h-4" />
+                                      </button>
+                                    )}
                                     <button className="text-gray-500 hover:text-white font-semibold text-xs group-hover:text-white group-hover:translate-x-[-2px] transition-all flex items-center gap-1">
                                       Detay <ChevronRight className="w-3.5 h-3.5" />
                                     </button>
@@ -2291,13 +2359,15 @@ export default function App() {
                             <div className="flex justify-between items-start mb-3">
                               <h4 className="text-white font-bold text-base group-hover:text-[#5865f2] transition-colors pr-2">{event.name}</h4>
                               <div className="flex items-center gap-2 shrink-0">
-                                <button 
-                                  onClick={(e) => { e.stopPropagation(); handleDeleteEvent(event.id); }}
-                                  className="text-gray-500 hover:text-red-400 p-1 rounded hover:bg-red-500/10 transition-colors"
-                                  title="Etkinliği Sil"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
+                                {currentUser?.role === 'admin' && (
+                                  <button 
+                                    onClick={(e) => { e.stopPropagation(); handleDeleteEvent(event.id); }}
+                                    className="text-gray-500 hover:text-red-400 p-1 rounded hover:bg-red-500/10 transition-colors"
+                                    title="Etkinliği Sil"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
                                 <span className="text-[10px] bg-[#5865f2]/10 text-[#5865f2] font-bold px-2 py-0.5 rounded border border-[#5865f2]/20">
                                   ETKİNLİK
                                 </span>
@@ -2417,13 +2487,15 @@ export default function App() {
                                 >
                                   <FileSpreadsheet className="w-3.5 h-3.5" /> Raporla
                                 </button>
-                                <button 
-                                  onClick={() => handleDeleteExam(s.name)}
-                                  className="bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-400 font-bold text-xs px-3 py-2 rounded transition-colors flex justify-center items-center"
-                                  title="Sınavı Sil"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
+                                {currentUser?.role === 'admin' && (
+                                  <button 
+                                    onClick={() => handleDeleteExam(s.name)}
+                                    className="bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-400 font-bold text-xs px-3 py-2 rounded transition-colors flex justify-center items-center"
+                                    title="Sınavı Sil"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
                               </div>
                             </div>
                           ));
@@ -2623,8 +2695,8 @@ export default function App() {
                 </div>
               )}
 
-                  {/* Yeni Sekme: Seçenek Yönetimi */}
-                  {activeTab === "settings" && (
+                  {/* Yeni Sekme: Kullanıcı Sayfası */}
+                  {activeTab === "profile" && (
                     <div className="space-y-6">
                       {/* Admin Profil Kartı */}
                       <div className="bg-[#313338] p-6 rounded-lg border border-[#36373d]/50 shadow-md flex items-center gap-6">
@@ -2635,7 +2707,7 @@ export default function App() {
                           <h3 className="text-white font-bold text-2xl mb-1">{currentUser?.firstName} {currentUser?.lastName}</h3>
                           <p className="text-[#b5bac1]">{currentUser?.email}</p>
                           <div className="mt-3 text-xs inline-block bg-[#2b2d31] px-3 py-1 rounded text-green-400 border border-[#1e1f22]">
-                            Yetki: Sistem Yöneticisi
+                            Yetki: {currentUser?.role === 'admin' ? "Sistem Yöneticisi" : "İzleyici (Viewer)"}
                           </div>
                         </div>
                         <button onClick={() => signOut(auth)} className="bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 px-4 py-2 rounded-md transition-colors flex items-center gap-2 font-bold">
@@ -2643,6 +2715,69 @@ export default function App() {
                         </button>
                       </div>
 
+                      {currentUser?.email === 'onur.demirkaya@tp-link.com' && (
+                        <div className="bg-[#313338] p-6 rounded-lg border border-[#36373d]/50 shadow-md">
+                          <div className="flex items-center gap-3 mb-6">
+                            <Users className="w-5 h-5 text-[#5865f2]" />
+                            <h3 className="text-white font-bold text-lg">Kullanıcı ve Yetki Yönetimi</h3>
+                          </div>
+                          <p className="text-xs text-[#b5bac1] mb-6">
+                            Bu alandan sisteme kayıt olan diğer kullanıcıların rollerini (Admin / Viewer) değiştirebilirsiniz. Bu panel sadece ana yöneticiye görünür.
+                          </p>
+                          <div className="overflow-x-auto rounded-lg border border-[#1e1f22]">
+                            <table className="w-full text-left border-collapse">
+                              <thead className="bg-[#1e1f22] text-[11px] uppercase font-bold text-gray-500">
+                                <tr>
+                                  <th className="px-4 py-3 border-b border-[#2b2d31]">Ad Soyad</th>
+                                  <th className="px-4 py-3 border-b border-[#2b2d31]">E-Posta</th>
+                                  <th className="px-4 py-3 border-b border-[#2b2d31]">Rol (Yetki)</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-[#2b2d31] bg-[#2b2d31]/50 text-sm">
+                                {systemUsers.map((u) => (
+                                  <tr key={u.id} className="hover:bg-[#2b2d31] transition-colors">
+                                    <td className="px-4 py-3 text-white font-semibold">
+                                      {u.firstName} {u.lastName}
+                                    </td>
+                                    <td className="px-4 py-3 text-gray-400 font-mono text-xs">
+                                      {u.email}
+                                    </td>
+                                    <td className="px-4 py-3">
+                                      {u.email === 'onur.demirkaya@tp-link.com' ? (
+                                        <span className="text-xs bg-[#5865f2]/10 text-[#5865f2] px-2 py-1 rounded font-bold border border-[#5865f2]/20">
+                                          Master Admin
+                                        </span>
+                                      ) : (
+                                        <select 
+                                          value={u.role || 'viewer'} 
+                                          onChange={(e) => handleRoleChange(u.id, e.target.value)}
+                                          className="bg-[#1e1f22] border border-[#36373d] rounded px-2 py-1 text-xs text-white focus:outline-none focus:border-[#5865f2]"
+                                        >
+                                          <option value="admin">Yönetici (Admin)</option>
+                                          <option value="viewer">İzleyici (Viewer)</option>
+                                        </select>
+                                      )}
+                                    </td>
+                                  </tr>
+                                ))}
+                                {systemUsers.length === 0 && (
+                                  <tr>
+                                    <td colSpan={3} className="px-4 py-8 text-center text-gray-500 text-xs">
+                                      Kullanıcı bilgisi yükleniyor veya bulunamadı.
+                                    </td>
+                                  </tr>
+                                )}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Yeni Sekme: Seçenek Yönetimi */}
+                  {activeTab === "settings" && (
+                    <div className="space-y-6">
                       <div className="bg-[#313338] p-6 rounded-lg border border-[#36373d]/50 shadow-md">
                         <div className="flex items-center gap-3 mb-6">
                           <Sliders className="w-5 h-5 text-[#5865f2]" />
@@ -2786,21 +2921,7 @@ export default function App() {
 
         </section>
 
-        {/* 4. FLOATING PERSISTENT SYSTEM BOTTOM DOCK */}
-        <div id="status-dock" className="fixed bottom-8 left-1/2 -translate-x-1/2 px-6 py-4 bg-[#313338] rounded-full anti-gravity flex items-center gap-8 border border-[#5865f2]/30 z-40 transition-transform hover:scale-102">
-          <div className="flex items-center gap-2.5">
-            <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse"></div>
-            <span className="text-xs font-bold text-white tracking-wide uppercase">SİSTEM AKTİF</span>
-          </div>
-          <div className="h-4 w-[1px] bg-[#2b2d31]"></div>
-          <div className="flex items-center gap-4 text-xs font-bold">
-            <span onClick={() => setActiveTab("participants")} className="text-gray-500 cursor-pointer hover:text-white px-2 py-1 rounded transition-colors">Loglar</span>
-            <span className="text-gray-500">Versiyon 1.4.2</span>
-            <span onClick={() => setActiveTab("upload")} className="text-[#5865f2] cursor-pointer px-2.5 py-1 rounded bg-[#5865f2]/10 hover:bg-[#5865f2]/20 transition-all font-semibold">
-              Excel Sihirbazı
-            </span>
-          </div>
-        </div>
+        {/* 4. FLOATING PERSISTENT SYSTEM BOTTOM DOCK (Removed per user request) */}
 
         {/* 5. SLIDING SIDE DRAWER / PANEL FOR PARTICIPANTS DETAY PANELI */}
         <AnimatePresence>
