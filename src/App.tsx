@@ -222,13 +222,19 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (user) {
+        if (!user.emailVerified) {
+          setCurrentUser(null);
+          setAuthLoading(false);
+          return;
+        }
+
         const docRef = doc(db, "admins", user.uid);
         const docSnap = await getDoc(docRef);
         if (docSnap.exists()) {
           const data = docSnap.data();
-          setCurrentUser({ uid: user.uid, email: user.email, role: data.role || "admin", ...data });
+          setCurrentUser({ uid: user.uid, email: user.email, role: data.role || "viewer", ...data });
         } else {
-          setCurrentUser({ uid: user.uid, email: user.email, firstName: "Yönetici", lastName: "", role: "admin" });
+          setCurrentUser({ uid: user.uid, email: user.email, firstName: "İzleyici", lastName: "", role: "viewer" });
         }
       } else {
         setCurrentUser(null);
