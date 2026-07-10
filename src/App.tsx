@@ -223,6 +223,7 @@ export default function App() {
   const [inviteeSearchTerm, setInviteeSearchTerm] = useState("");
   const [inviteeEventFilter, setInviteeEventFilter] = useState("all");
   const [inviteeStatusFilter, setInviteeStatusFilter] = useState("all");
+  const [inviteeCompanyFilter, setInviteeCompanyFilter] = useState("all");
   const [users, setUsers] = useState<UserData[]>([]);
   const [events, setEvents] = useState<EventData[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -232,6 +233,9 @@ export default function App() {
   const [selectedInviteeIds, setSelectedInviteeIds] = useState<string[]>([]);
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
   const [inviteeSortConfig, setInviteeSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
+  const [participantEventFilter, setParticipantEventFilter] = useState("all");
+  const [participantStatusFilter, setParticipantStatusFilter] = useState("all");
+  const [participantCompanyFilter, setParticipantCompanyFilter] = useState("all");
 
   // Detail panel state
   const [selectedUser, setSelectedUser] = useState<UserData | null>(null);
@@ -603,11 +607,37 @@ export default function App() {
   }, [users, sortConfig]);
 
   // Search filtering
-  const filteredUsers = sortedUsers.filter(user => 
-    `${user.firstName} ${user.lastName}`.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (user.company && user.company.toLowerCase().includes(searchTerm.toLowerCase())) ||
-    (user.email && user.email.toLowerCase().includes(searchTerm.toLowerCase()))
-  );
+  const filteredUsers = sortedUsers.filter(user => {
+    const matchesSearch = 
+      `${user.firstName} ${user.lastName}`.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (user.company && user.company.toLowerCase().includes(searchTerm.toLowerCase())) ||
+      (user.email && user.email.toLowerCase().includes(searchTerm.toLowerCase()));
+
+    let matchesEvent = true;
+    if (participantEventFilter !== "all") {
+      matchesEvent = user.attendances?.some(a => a.event.id === participantEventFilter) || false;
+    }
+
+    let matchesStatus = true;
+    if (participantStatusFilter !== "all") {
+      if (participantStatusFilter === "Davet Edildi - Katılmadı") {
+        matchesStatus = user.examStatus === "Sınava Katılmadı" || user.examStatus === "Davet Edildi - Katılmadı" || user.attendances?.some(a => a.attendanceStatus === "Davetli");
+      } else {
+        matchesStatus = user.examStatus === participantStatusFilter || user.attendances?.some(a => a.attendanceStatus === participantStatusFilter);
+      }
+    }
+
+    let matchesCompany = true;
+    if (participantCompanyFilter !== "all") {
+      if (participantCompanyFilter === "Serbest / Tanımsız") {
+        matchesCompany = !user.company || user.company.trim() === "";
+      } else {
+        matchesCompany = user.company === participantCompanyFilter;
+      }
+    }
+
+    return matchesSearch && matchesEvent && matchesStatus && matchesCompany;
+  });
 
   const filteredEvents = events.filter(event => 
     event.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -641,6 +671,15 @@ export default function App() {
       result = result.filter(item => item.attendance.attendanceStatus === inviteeStatusFilter);
     }
 
+    if (inviteeCompanyFilter !== "all") {
+      result = result.filter(item => {
+        if (inviteeCompanyFilter === "Serbest / Tanımsız") {
+          return !item.user.company || item.user.company.trim() === "";
+        }
+        return item.user.company === inviteeCompanyFilter;
+      });
+    }
+
     if (inviteeSortConfig !== null) {
       result.sort((a, b) => {
         let aValue = "";
@@ -669,7 +708,7 @@ export default function App() {
     }
 
     return result;
-  }, [users, inviteeSearchTerm, inviteeEventFilter, inviteeStatusFilter, inviteeSortConfig]);
+  }, [users, inviteeSearchTerm, inviteeEventFilter, inviteeStatusFilter, inviteeCompanyFilter, inviteeSortConfig]);
 
   // Drag & drop handlers
   const handleDrag = (e: React.DragEvent) => {
@@ -1145,6 +1184,32 @@ export default function App() {
     showToast("Davetli listesi Excel olarak dışa aktarıldı.", "success");
   };
 
+  const handleExportParticipantsExcel = () => {
+    const dataToExport = selectedUserIds.length > 0 
+      ? filteredUsers.filter(u => selectedUserIds.includes(u.id))
+      : filteredUsers;
+
+    if (dataToExport.length === 0) {
+      showToast("Dışa aktarılacak veri bulunamadı.", "error");
+      return;
+    }
+
+    const exportData = dataToExport.map(u => ({
+      "Adı": u.firstName,
+      "Soyadı": u.lastName,
+      "Email": u.email,
+      "Telefon": u.phone || "",
+      "Firma Bilgisi": u.company || "",
+      "Durum": u.examStatus || "Kayıtlı",
+    }));
+
+    const ws = utils.json_to_sheet(exportData);
+    const wb = utils.book_new();
+    utils.book_append_sheet(wb, ws, "Katılımcı Listesi");
+    writeFile(wb, "Katilimci_Listesi.xlsx");
+    showToast("Katılımcı listesi Excel olarak dışa aktarıldı.", "success");
+  };
+
   // Export Data to Excel
   const handleExportExcel = () => {
     // 1. Filtreleme İşlemi (AND mantığı)
@@ -1557,16 +1622,17 @@ export default function App() {
             <span>
               {activeTab === "dashboard" && "Ana Sayfa / İstatistikler"}
               {activeTab === "participants" && "Katılımcı Yönetimi"}
+              {activeTab === "invitees" && "Davetli Listesi"}
               {activeTab === "events" && "Etkinlik Planlama"}
               {activeTab === "exams" && "Sertifika & Sınavlar"}
               {activeTab === "upload" && "Akıllı Excel Sihirbazı"}
               {activeTab === "settings" && "Seçenek Yönetimi"}
             </span>
-            <span className="text-gray-600">/</span>
+            {activeTab !== "participants" && activeTab !== "events" && activeTab !== "invitees" && (
+              <span className="text-gray-600">/</span>
+            )}
             <span className="text-[#b5bac1] font-normal text-sm flex items-center gap-1.5">
               {activeTab === "dashboard" && "Genel Bakış"}
-              {activeTab === "participants" && `${users.length} Toplam Kayıt`}
-              {activeTab === "events" && `${events.length} Aktif Eğitim`}
               {activeTab === "exams" && "Puan Baremleri"}
               {activeTab === "upload" && "Sürükle-bırak excel aktarımı"}
               {activeTab === "settings" && "Dinamik Form Seçenekleri"}
@@ -1582,18 +1648,6 @@ export default function App() {
           </div>
           
           <div className="flex items-center gap-4">
-            {/* Elegant Search bar matching Sleek theme */}
-            <div className="relative">
-              <input 
-                type="text" 
-                placeholder="İsim, mail veya kurum ara..." 
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="bg-[#1e1f22] border border-[#2b2d31] rounded-md px-4 py-1.5 pl-9 text-sm focus:outline-none focus:border-[#5865f2] w-64 text-white placeholder-gray-500 transition-all duration-300"
-              />
-              <Search className="w-4 h-4 absolute left-3 top-2.5 text-gray-500" />
-            </div>
-
             <button 
               onClick={() => { setActiveTab("upload"); }}
               className="bg-[#5865f2] text-white px-4 py-2 rounded-md text-sm font-bold flex items-center gap-2 anti-gravity hover:shadow-lg hover:shadow-[#5865f2]/20"
@@ -1805,7 +1859,7 @@ export default function App() {
                 <div className="bg-[#313338] rounded-lg flex flex-col anti-gravity overflow-hidden border border-[#36373d]/40">
                   <div className="p-5 border-b border-[#1e1f22] bg-[#2b2d31]/30 flex justify-between items-center flex-wrap gap-4">
                     <div>
-                      <h3 className="text-white font-bold text-base">Davetli ve Katılımcı Listesi ({inviteesData.length} Kişi)</h3>
+                      <h3 className="text-white font-bold text-base">Davetli Listesi ({inviteesData.length} Kişi)</h3>
                       <p className="text-xs text-gray-500">Etkinliklere davet edilen kişileri ve katılım durumlarını buradan takip edebilirsiniz.</p>
                     </div>
                     <div className="flex gap-4 items-center">
@@ -1837,6 +1891,18 @@ export default function App() {
                         <option value="all">Tüm Durumlar</option>
                         <option value="Davetli">Davetli (Katılmadı)</option>
                         <option value="Katıldı">Katıldı</option>
+                      </select>
+
+                      <select 
+                        value={inviteeCompanyFilter}
+                        onChange={(e) => setInviteeCompanyFilter(e.target.value)}
+                        className="bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-1.5 text-sm focus:outline-none focus:border-[#5865f2] text-white max-w-[150px] truncate"
+                      >
+                        <option value="all">Tüm Şirketler</option>
+                        <option value="Serbest / Tanımsız">Serbest / Tanımsız</option>
+                        {Array.from(new Set(users.map(u => u.company).filter(c => c && c.trim() !== ""))).sort().map((company, i) => (
+                          <option key={i} value={company}>{company}</option>
+                        ))}
                       </select>
                       {selectedInviteeIds.length > 0 && (
                         <button 
@@ -1974,12 +2040,55 @@ export default function App() {
 
               {activeTab === "participants" && (
                 <div className="bg-[#313338] rounded-lg flex flex-col anti-gravity overflow-hidden border border-[#36373d]/40">
-                  <div className="p-5 border-b border-[#1e1f22] bg-[#2b2d31]/30 flex justify-between items-center">
+                  <div className="p-5 border-b border-[#1e1f22] bg-[#2b2d31]/30 flex justify-between items-center flex-wrap gap-4">
                     <div>
-                      <h3 className="text-white font-bold text-base">Güncel Katılımcı Listesi</h3>
+                      <h3 className="text-white font-bold text-base">Güncel Katılımcı Listesi ({filteredUsers.length} Kişi)</h3>
                       <p className="text-xs text-gray-500">Katılımcıların detaylarını, katıldıkları eğitimleri ve sınav notlarını görmek için satıra tıklayın.</p>
                     </div>
-                    <div className="flex gap-2 items-center">
+                    <div className="flex gap-4 items-center">
+                      <div className="relative">
+                        <input 
+                          type="text" 
+                          placeholder="İsim, e-posta veya kurum ara..." 
+                          value={searchTerm}
+                          onChange={(e) => setSearchTerm(e.target.value)}
+                          className="bg-[#1e1f22] border border-[#2b2d31] rounded-md px-4 py-1.5 pl-9 text-sm focus:outline-none focus:border-[#5865f2] w-64 text-white placeholder-gray-500 transition-all duration-300"
+                        />
+                        <Search className="w-4 h-4 absolute left-3 top-2.5 text-gray-500" />
+                      </div>
+                      
+                      <select 
+                        value={participantEventFilter}
+                        onChange={(e) => setParticipantEventFilter(e.target.value)}
+                        className="bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-1.5 text-sm focus:outline-none focus:border-[#5865f2] text-white"
+                      >
+                        <option value="all">Tüm Etkinlikler</option>
+                        {events.map(ev => <option key={ev.id} value={ev.id}>{ev.name}</option>)}
+                      </select>
+
+                      <select 
+                        value={participantStatusFilter}
+                        onChange={(e) => setParticipantStatusFilter(e.target.value)}
+                        className="bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-1.5 text-sm focus:outline-none focus:border-[#5865f2] text-white"
+                      >
+                        <option value="all">Tümü</option>
+                        <option value="Sınava Girdi - Başarılı">Sınava Girdi - Başarılı</option>
+                        <option value="Sınava Girdi - Başarısız">Sınava Girdi - Başarısız</option>
+                        <option value="Davet Edildi - Katılmadı">Davet Edildi - Katılmadı</option>
+                        <option value="Sınava Davet Edildi">Sınava Davet Edildi</option>
+                      </select>
+
+                      <select 
+                        value={participantCompanyFilter}
+                        onChange={(e) => setParticipantCompanyFilter(e.target.value)}
+                        className="bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-1.5 text-sm focus:outline-none focus:border-[#5865f2] text-white max-w-[150px] truncate"
+                      >
+                        <option value="all">Tüm Şirketler</option>
+                        <option value="Serbest / Tanımsız">Serbest / Tanımsız</option>
+                        {Array.from(new Set(users.map(u => u.company).filter(c => c && c.trim() !== ""))).sort().map((company, i) => (
+                          <option key={i} value={company}>{company}</option>
+                        ))}
+                      </select>
                       {selectedUserIds.length > 0 && (
                         <button 
                           onClick={handleBulkDeleteUsers}
@@ -1989,14 +2098,11 @@ export default function App() {
                         </button>
                       )}
                       <button
-                        onClick={() => setIsExportModalOpen(true)}
+                        onClick={handleExportParticipantsExcel}
                         className="bg-green-600/20 text-green-400 hover:bg-green-600 hover:text-white px-3 py-1.5 rounded border border-green-500/30 font-bold text-xs transition-all flex items-center gap-1.5"
                       >
-                        <FileSpreadsheet className="w-3.5 h-3.5" /> Excel'e Aktar
+                        <FileSpreadsheet className="w-3.5 h-3.5" /> Dışa Aktar
                       </button>
-                      <span className="bg-[#2b2d31] text-[10px] px-3 py-1 rounded border border-[#1e1f22] text-[#b5bac1] font-semibold">
-                        Görünüm: Akışkan Tablo
-                      </span>
                     </div>
                   </div>
 
@@ -2148,8 +2254,22 @@ export default function App() {
               {activeTab === "events" && (
                 <div className="space-y-6">
                   <div className="bg-[#313338] rounded-lg p-5 border border-[#36373d]/40 anti-gravity">
-                    <h3 className="text-white font-bold text-base mb-2">Aktif Eğitim Etkinlikleri</h3>
-                    <p className="text-xs text-gray-500 mb-6">Farklı tarihlerde düzenlenen eğitimler, katılım sayıları ve ilişkili sınav geçme baremleri.</p>
+                    <div className="flex justify-between items-start mb-6">
+                      <div>
+                        <h3 className="text-white font-bold text-base mb-2">Aktif Eğitim Etkinlikleri</h3>
+                        <p className="text-xs text-gray-500">Farklı tarihlerde düzenlenen eğitimler, katılım sayıları ve ilişkili sınav geçme baremleri.</p>
+                      </div>
+                      <div className="relative">
+                        <input 
+                          type="text" 
+                          placeholder="Etkinlik ara..." 
+                          value={searchTerm}
+                          onChange={(e) => setSearchTerm(e.target.value)}
+                          className="bg-[#1e1f22] border border-[#2b2d31] rounded-md px-4 py-1.5 pl-9 text-sm focus:outline-none focus:border-[#5865f2] w-64 text-white placeholder-gray-500 transition-all duration-300"
+                        />
+                        <Search className="w-4 h-4 absolute left-3 top-2.5 text-gray-500" />
+                      </div>
+                    </div>
 
                     {loading ? (
                       <div className="flex flex-col items-center justify-center py-16">
