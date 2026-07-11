@@ -2105,19 +2105,19 @@ export default function App() {
 
               {activeTab === "participants" && (
                 <div className="bg-[#313338] rounded-lg flex flex-col anti-gravity overflow-hidden border border-[#36373d]/40">
-                  <div className="p-5 border-b border-[#1e1f22] bg-[#2b2d31]/30 flex justify-between items-center flex-wrap gap-4">
-                    <div>
+                  <div className="p-4 sm:p-5 border-b border-[#1e1f22] bg-[#2b2d31]/30 flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4">
+                    <div className="w-full xl:w-auto">
                       <h3 className="text-white font-bold text-base">Güncel Katılımcı Listesi ({filteredUsers.length} Kişi)</h3>
                       <p className="text-xs text-gray-500">Katılımcıların detaylarını, katıldıkları eğitimleri ve sınav notlarını görmek için satıra tıklayın.</p>
                     </div>
-                    <div className="flex gap-4 items-center">
-                      <div className="relative">
+                    <div className="flex flex-wrap gap-3 items-center w-full xl:w-auto xl:justify-end">
+                      <div className="relative w-full sm:w-auto flex-1 sm:flex-none min-w-[200px]">
                         <input 
                           type="text" 
                           placeholder="İsim, e-posta veya kurum ara..." 
                           value={searchTerm}
                           onChange={(e) => setSearchTerm(e.target.value)}
-                          className="bg-[#1e1f22] border border-[#2b2d31] rounded-md px-4 py-1.5 pl-9 text-sm focus:outline-none focus:border-[#5865f2] w-64 text-white placeholder-gray-500 transition-all duration-300"
+                          className="bg-[#1e1f22] border border-[#2b2d31] rounded-md px-4 py-1.5 pl-9 text-sm focus:outline-none focus:border-[#5865f2] w-full text-white placeholder-gray-500 transition-all duration-300"
                         />
                         <Search className="w-4 h-4 absolute left-3 top-2.5 text-gray-500" />
                       </div>
@@ -2125,7 +2125,7 @@ export default function App() {
                       <select 
                         value={participantEventFilter}
                         onChange={(e) => setParticipantEventFilter(e.target.value)}
-                        className="bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-1.5 text-sm focus:outline-none focus:border-[#5865f2] text-white"
+                        className="bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-1.5 text-sm focus:outline-none focus:border-[#5865f2] text-white flex-1 sm:flex-none min-w-[140px]"
                       >
                         <option value="all">Tüm Etkinlikler</option>
                         {events.map(ev => <option key={ev.id} value={ev.id}>{ev.name}</option>)}
@@ -2134,7 +2134,7 @@ export default function App() {
                       <select 
                         value={participantStatusFilter}
                         onChange={(e) => setParticipantStatusFilter(e.target.value)}
-                        className="bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-1.5 text-sm focus:outline-none focus:border-[#5865f2] text-white"
+                        className="bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-1.5 text-sm focus:outline-none focus:border-[#5865f2] text-white flex-1 sm:flex-none min-w-[140px]"
                       >
                         <option value="all">Tümü</option>
                         <option value="Sınava Girdi - Başarılı">Sınava Girdi - Başarılı</option>
@@ -2146,7 +2146,7 @@ export default function App() {
                       <select 
                         value={participantCompanyFilter}
                         onChange={(e) => setParticipantCompanyFilter(e.target.value)}
-                        className="bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-1.5 text-sm focus:outline-none focus:border-[#5865f2] text-white max-w-[150px] truncate"
+                        className="bg-[#1e1f22] border border-[#2b2d31] rounded-md px-3 py-1.5 text-sm focus:outline-none focus:border-[#5865f2] text-white w-full sm:w-[150px] flex-1 sm:flex-none"
                       >
                         <option value="all">Tüm Şirketler</option>
                         <option value="Serbest / Tanımsız">Serbest / Tanımsız</option>
@@ -2157,14 +2157,14 @@ export default function App() {
                       {selectedUserIds.length > 0 && currentUser?.role === 'admin' && (
                         <button 
                           onClick={handleBulkDeleteUsers}
-                          className="bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white px-3 py-1.5 rounded border border-red-500/20 font-bold text-xs transition-all flex items-center gap-1.5"
+                          className="bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white px-3 py-1.5 rounded border border-red-500/20 font-bold text-xs transition-all flex items-center justify-center gap-1.5 w-full sm:w-auto"
                         >
                           <Trash2 className="w-3.5 h-3.5" /> Seçili {selectedUserIds.length} Kişiyi Sil
                         </button>
                       )}
                       <button
                         onClick={handleExportParticipantsExcel}
-                        className="bg-green-600/20 text-green-400 hover:bg-green-600 hover:text-white px-3 py-1.5 rounded border border-green-500/30 font-bold text-xs transition-all flex items-center gap-1.5"
+                        className="bg-green-600/20 text-green-400 hover:bg-green-600 hover:text-white px-3 py-1.5 rounded border border-green-500/30 font-bold text-xs transition-all flex items-center justify-center gap-1.5 w-full sm:w-auto"
                       >
                         <FileSpreadsheet className="w-3.5 h-3.5" /> Dışa Aktar
                       </button>
