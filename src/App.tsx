@@ -696,7 +696,7 @@ export default function App() {
   const filteredEvents = events.filter(event => 
     event.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
     (event.location && event.location.toLowerCase().includes(searchTerm.toLowerCase()))
-  );
+  ).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
   // Invitees data derived from users attendances
   const inviteesData = React.useMemo(() => {
@@ -1463,7 +1463,9 @@ export default function App() {
   const handleUpdateEvent = async () => {
     if (!selectedEvent || !editingEventData) return;
     try {
-      const dbUrl = "http://localhost:3000"; // Assuming local node or firebase
+      const eventRef = doc(db, "events", selectedEvent.id);
+      await setDoc(eventRef, editingEventData, { merge: true });
+      
       // Update local state first for immediate UI feedback
       const updatedEvents = events.map(e => e.id === selectedEvent.id ? { ...e, ...editingEventData } : e);
       setEvents(updatedEvents);
